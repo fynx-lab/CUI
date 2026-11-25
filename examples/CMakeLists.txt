@@ -9,7 +9,7 @@ endfunction()
 
 cui_example(hello hello.c)
 if(WIN32)
-    cui_example(map_online_win32 map_online_win32.cpp map_tilejson.cpp vendor/json11/json11.cpp)
+    cui_example(map_online_win32 map_online_win32.cpp map_tilejson.cpp map_demo_jobs.cpp vendor/json11/json11.cpp)
     set_target_properties(map_online_win32 PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
     target_link_libraries(map_online_win32 PRIVATE winhttp)
 endif()

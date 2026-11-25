@@ -6,6 +6,7 @@
 #include <cui/cui.h>
 #include <cui/cui_app.h>
 #include "map_tilejson.hpp"
+#include "map_demo_jobs.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,9 +15,9 @@
 #define QUEUE 64
 #define WORKERS 4
 #define BODY_CAP (2 * 1024 * 1024)
-typedef struct { int z, x, y, state; unsigned used; cui_mvt_tile *tile; } slot;
-typedef struct { int z, x, y; char path[240]; } job;
-typedef struct { int z, x, y, ok; char *json; cui_mvt_tile *tile; } result;
+typedef map_demo_slot slot;
+typedef map_demo_job job;
+typedef struct { int z, x, y, ok; uint64_t token; char *json; cui_mvt_tile *tile; } result;
 typedef struct {
     CRITICAL_SECTION lock;
     HANDLE available, threads[WORKERS];
@@ -24,17 +25,20 @@ typedef struct {
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[QUEUE + WORKERS]; int rhead, rtail, rcount;
     slot tiles[SLOTS]; unsigned frame;
-    char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
+    char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected; uint64_t next_token;
     cui_map_view view;
 } demo;
 
-static void queue_job(demo *d, job item) {
+static bool queue_job(demo *d, job item) {
+    bool queued = false;
     EnterCriticalSection(&d->lock);
     if (d->jcount < QUEUE && !d->stopping) {
         d->jobs[d->jtail] = item; d->jtail = (d->jtail + 1) % QUEUE; d->jcount++;
+        queued = true;
         ReleaseSemaphore(d->available, 1, NULL);
     }
     LeaveCriticalSection(&d->lock);
+    return queued;
 }
 static int fetch(const char *path, char **out, int cap) {
     int n = -1; *out = NULL;
@@ -88,7 +92,7 @@ static DWORD WINAPI worker(void *arg) {
         LeaveCriticalSection(&d->lock);
         char *bytes = NULL;
         int n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP);
-        result r = {j.z, j.x, j.y, n > 0, NULL, NULL};
+        result r = {j.z, j.x, j.y, n > 0, j.token, NULL, NULL};
         if (j.z < 0) r.json = bytes;
         else { if (n > 0) r.tile = cui_mvt_tile_decode(bytes, (size_t)n); r.ok = r.tile != NULL; free(bytes); }
         /* A slow UI frame can finish more than 68 jobs before it drains the
@@ -137,7 +141,7 @@ static void pump(demo *d) {
         } else {
             slot *s = NULL;
             for (int k = 0; k < SLOTS; k++) if (d->tiles[k].state == 1 && d->tiles[k].z == r->z && d->tiles[k].x == r->x && d->tiles[k].y == r->y) { s = &d->tiles[k]; break; }
-            if (s) { s->tile = r->tile; s->state = r->ok ? 2 : 3; if (!r->ok) d->failures++; }
+            if (s && s->token == r->token && s->z == r->z && s->x == r->x && s->y == r->y) { s->tile = r->tile; s->state = r->ok ? 2 : 3; if (!r->ok) d->failures++; }
             else cui_mvt_tile_destroy(r->tile);
         }
     }
@@ -176,9 +180,10 @@ static void tile_request(void *user, int z, int x, int y) {
     LeaveCriticalSection(&d->lock);
     if (!space) return;
     cui_mvt_tile_destroy(s->tile);
-    *s = slot{z, x, y, 1, d->frame, NULL};
-    job j = {z, x, y, ""}; memcpy(j.path, path, (size_t)n + 1);
-    queue_job(d, j);
+    d->next_token++;
+    *s = slot{z, x, y, 1, d->frame, NULL, d->next_token};
+    job j = {z, x, y, "", d->next_token}; memcpy(j.path, path, (size_t)n + 1);
+    if (!queue_job(d, j)) { *s = slot{}; return; }
 }
 static void stop(demo *d) {
     EnterCriticalSection(&d->lock); d->stopping = true; LeaveCriticalSection(&d->lock);
@@ -218,7 +223,7 @@ int main(void) {
         for (int i = 0; i < started; i++) CloseHandle(d->threads[i]);
         CloseHandle(d->available); DeleteCriticalSection(&d->lock); cui_app_destroy(app); free(d); return 1;
     }
-    job first = {-1, 0, 0, "/planet"};
+    job first = {-1, 0, 0, "/planet", 1};
     if (getenv("CUI_MAP_DEMO_OFFLINE")) d->tilejson = -1; /* deterministic failure-state smoke test */
     else queue_job(d, first);
     const cui_map_marker markers[] = {{0, 52.52, 13.405, "Berlin"}, {1, 48.8566, 2.3522, "Paris"}};
@@ -249,6 +254,9 @@ int main(void) {
         options.markers = markers; options.marker_count = 2;
         options.min_zoom = d->min_zoom; options.max_zoom = d->max_zoom ? d->max_zoom : 14;
         cui_map_result hit = cui_map_ex(ui, "online-map", &d->view, &options);
+        EnterCriticalSection(&d->lock);
+        map_demo_cancel_stale(d->tiles, SLOTS, d->jobs, QUEUE, d->jhead, d->jtail, d->jcount, d->frame);
+        LeaveCriticalSection(&d->lock);
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
         cui_row_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);

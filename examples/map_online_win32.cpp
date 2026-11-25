@@ -5,6 +5,7 @@
 #include <winhttp.h>
 #include <cui/cui.h>
 #include <cui/cui_app.h>
+#include "map_tilejson.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,7 @@ typedef struct {
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[QUEUE + WORKERS]; int rhead, rtail, rcount;
     slot tiles[SLOTS]; unsigned frame;
-    char template_path[240]; int tilejson; int failures, selected;
+    char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
     cui_map_view view;
 } demo;
 
@@ -58,7 +59,7 @@ static int fetch(const char *path, char **out, int cap) {
     DWORD code = 0, len = sizeof code;
     if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX, &code, &len, WINHTTP_NO_HEADER_INDEX) || code != 200) goto done;
-    char *bytes = malloc((size_t)cap + 1);
+    char *bytes = static_cast<char *>(malloc((size_t)cap + 1));
     if (!bytes) goto done;
     n = 0;
     for (;;) {
@@ -77,7 +78,7 @@ done:
     return n;
 }
 static DWORD WINAPI worker(void *arg) {
-    demo *d = arg;
+    demo *d = static_cast<demo *>(arg);
     for (;;) {
         WaitForSingleObject(d->available, INFINITE);
         EnterCriticalSection(&d->lock);
@@ -114,20 +115,10 @@ static DWORD WINAPI worker(void *arg) {
 /* Only accept a versioned tile path at OpenFreeMap's HTTPS host. TileJSON
  * supplies this path, never a compiled-in, potentially stale timestamp. */
 static bool template_from_json(demo *d, const char *json) {
-    const char *list = strstr(json, "\"tiles\"");
-    if (!list || !(list = strchr(list, '[')) || !(list = strchr(list, '"'))) return false;
-    const char *end = strchr(++list, '"');
-    static const char prefix[] = "https://tiles.openfreemap.org/planet/";
-    if (!end || (size_t)(end - list) >= 239 || strncmp(list, prefix, sizeof prefix - 1)) return false;
-    const char *path = list + sizeof prefix - 1;
-    if (!strstr(path, "/{z}/{x}/{y}.pbf") || strstr(path, "/{z}/{x}/{y}.pbf") >= end) return false;
-    for (const char *p = path; p < end; p++)
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') || *p == '/' || *p == '_' || *p == '-' || *p == '.' || *p == '{' || *p == '}')) return false;
-    d->template_path[0] = '/'; memcpy(d->template_path + 1, "planet/", 7);
-    size_t n = (size_t)(end - path);
-    if (n + 8 >= sizeof d->template_path) return false;
-    memcpy(d->template_path + 8, path, n); d->template_path[8 + n] = 0;
+    map_tilejson parsed; std::string error;
+    if (!map_parse_tilejson(json, parsed, error)) return false;
+    memcpy(d->template_path, parsed.path_template.c_str(), parsed.path_template.size() + 1);
+    d->min_zoom = parsed.min_zoom; d->max_zoom = parsed.max_zoom;
     return true;
 }
 static void pump(demo *d) {
@@ -159,12 +150,12 @@ static slot *find(demo *d, int z, int x, int y) {
     return NULL;
 }
 static const cui_mvt_tile *tile_lookup(void *user, int z, int x, int y) {
-    demo *d = user; slot *s = find(d, z, x, y);
+    demo *d = static_cast<demo *>(user); slot *s = find(d, z, x, y);
     if (s) { s->used = d->frame; return s->tile; }
     return NULL;
 }
 static void tile_request(void *user, int z, int x, int y) {
-    demo *d = user;
+    demo *d = static_cast<demo *>(user);
     if (d->tilejson != 1 || find(d, z, x, y)) return;
     int index = -1; unsigned oldest = ~0u;
     for (int i = 0; i < SLOTS; i++) {
@@ -185,7 +176,7 @@ static void tile_request(void *user, int z, int x, int y) {
     LeaveCriticalSection(&d->lock);
     if (!space) return;
     cui_mvt_tile_destroy(s->tile);
-    *s = (slot){z, x, y, 1, d->frame, NULL};
+    *s = slot{z, x, y, 1, d->frame, NULL};
     job j = {z, x, y, ""}; memcpy(j.path, path, (size_t)n + 1);
     queue_job(d, j);
 }
@@ -202,13 +193,15 @@ static void stop(demo *d) {
     }
 }
 int main(void) {
-    demo *d = calloc(1, sizeof *d);
+    demo *d = static_cast<demo *>(calloc(1, sizeof *d));
     if (!d) return 1;
-    d->view = (cui_map_view){52.52, 13.405, 8}; d->selected = -1;
+    d->view = cui_map_view{52.52, 13.405, 8}; d->selected = -1;
     InitializeCriticalSection(&d->lock);
     d->available = CreateSemaphoreW(NULL, 0, QUEUE + WORKERS, NULL);
-    cui_app_desc desc = {.title = "CUI native vector map (OpenFreeMap)", .width = 1000, .height = 680,
-                         .min_width = 450, .min_height = 360, .theme = CUI_THEME_DARK};
+    cui_app_desc desc = {};
+    desc.title = "CUI native vector map (OpenFreeMap)";
+    desc.width = 1000; desc.height = 680; desc.min_width = 450; desc.min_height = 360;
+    desc.theme = CUI_THEME_DARK;
     desc.continuous = getenv("CUI_SCREENSHOT") != NULL;
     cui_app *app = d->available ? cui_app_create(&desc) : NULL;
     if (!app) { if (d->available) CloseHandle(d->available); DeleteCriticalSection(&d->lock); free(d); return 1; }
@@ -232,30 +225,36 @@ int main(void) {
     while (cui_app_frame(app)) {
         cui_ctx *ui = cui_app_ui(app);
         pump(d); d->frame++;
-        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL, .gap = 0) {
-            cui_row(ui, .pad = 12, .gap = 16, .width = CUI_FILL) {
-                cui_heading(ui, "Native vector map", 3);
-                if (d->tilejson == 0) cui_secondary(ui, "Connecting to OpenFreeMap...");
-                else if (d->tilejson < 0) {
-                    cui_secondary(ui, "Tile service unavailable.");
-                    if (cui_button(ui, "Retry connection")) { d->tilejson = 0; queue_job(d, first); }
-                } else if (d->failures) {
-                    cui_textf(ui, "%d tiles unavailable", d->failures);
-                    if (cui_button(ui, "Retry tiles")) {
-                        for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
-                        d->failures = 0;
-                    }
-                } else cui_secondary(ui, "Drag to pan  ·  Wheel to zoom  ·  Arrow keys to move");
+        cui_box root = {}, header = {}, footer = {};
+        root.width = CUI_FILL; root.height = CUI_FILL;
+        header.pad = 12; header.gap = 16; header.width = CUI_FILL;
+        footer.pad = 10; footer.gap = 16; footer.width = CUI_FILL;
+        cui_column_begin(ui, &root);
+        cui_row_begin(ui, &header);
+        cui_heading(ui, "Native vector map", 3);
+        if (d->tilejson == 0) cui_secondary(ui, "Connecting to OpenFreeMap...");
+        else if (d->tilejson < 0) {
+            cui_secondary(ui, "Tile service unavailable.");
+            if (cui_button_ex(ui, "Retry connection", nullptr)) { d->tilejson = 0; queue_job(d, first); }
+        } else if (d->failures) {
+            cui_textf(ui, "%d tiles unavailable", d->failures);
+            if (cui_button_ex(ui, "Retry tiles", nullptr)) {
+                for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
+                d->failures = 0;
             }
-            cui_map_result hit = cui_map(ui, "online-map", &d->view,
-                .lookup = tile_lookup, .request = tile_request, .tile_user = d,
-                .markers = markers, .marker_count = 2, .min_zoom = 0, .max_zoom = 14);
-            if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
-            cui_row(ui, .pad = 10, .gap = 16, .width = CUI_FILL) {
-                cui_text(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap");
-                if (d->selected >= 0) cui_textf(ui, "Marker: %s", markers[d->selected].label);
-            }
-        }
+        } else cui_secondary(ui, "Drag to pan  ·  Wheel to zoom  ·  Arrow keys to move");
+        cui_box_end(ui);
+        cui_map_opts options = {};
+        options.lookup = tile_lookup; options.request = tile_request; options.tile_user = d;
+        options.markers = markers; options.marker_count = 2;
+        options.min_zoom = d->min_zoom; options.max_zoom = d->max_zoom ? d->max_zoom : 14;
+        cui_map_result hit = cui_map_ex(ui, "online-map", &d->view, &options);
+        if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
+        cui_row_begin(ui, &footer);
+        cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
+        if (d->selected >= 0) cui_textf(ui, "Marker: %s", markers[d->selected].label);
+        cui_box_end(ui);
+        cui_box_end(ui);
     }
     stop(d); cui_app_destroy(app); free(d);
     return 0;

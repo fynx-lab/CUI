@@ -5143,6 +5143,8 @@ CUI_API bool cui_wheel_take(cui_ctx *ui, cui_id id, cui_vec2 *delta);
  * OpenMapTiles schema, not full MapLibre styles. */
 typedef struct cui_mvt_tile cui_mvt_tile;
 CUI_API cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size);
+/* Approximate owned heap bytes, including reserved geometry capacities; NULL is zero. */
+CUI_API size_t cui_mvt_tile_memory_usage(const cui_mvt_tile *tile);
 CUI_API void cui_mvt_tile_destroy(cui_mvt_tile *tile);
 typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_view;
 typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;

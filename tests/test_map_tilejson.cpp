@@ -33,6 +33,9 @@ int main() {
     check("{\"tiles\":[\"https://tiles.openfreemap.org/private/{z}/{x}/{y}.pbf\"],\"minzoom\":0,\"maxzoom\":14}", false, "wrong path");
     check("{\"tiles\":[\"https://tiles.openfreemap.org/planet/version_1/{z}/{x}/{x}/{y}.pbf\"],\"minzoom\":0,\"maxzoom\":14}", false, "duplicate coordinate");
     check("{\"tiles\":[\"https://tiles.openfreemap.org/planet/version_1/{z}/{x}/{y}.pbf?token=x\"],\"minzoom\":0,\"maxzoom\":14}", false, "query");
+    check("{\"tiles\":[\"https://tiles.openfreemap.org/planet/../{z}/{x}/{y}.pbf\"],\"minzoom\":0,\"maxzoom\":14}", false, "path traversal");
+    check("{\"tiles\":[\"https://tiles.openfreemap.org/planet/extra/sub/{z}/{x}/{y}.pbf\"],\"minzoom\":0,\"maxzoom\":14}", false, "extra path segment");
+    check("{\"tiles\":[\"https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf\"],\"minzoom\":0,\"maxzoom\":14}", false, "unversioned");
     check(std::string(65537, ' '), false, "size limit");
     std::fprintf(stderr, "TileJSON tests: %s\n", failures ? "FAILED" : "OK");
     return failures ? 1 : 0;

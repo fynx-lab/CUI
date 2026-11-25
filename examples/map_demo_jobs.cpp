@@ -1,5 +1,12 @@
 #include "map_demo_jobs.hpp"
 
+unsigned map_demo_retry_delay_ms(int attempt, unsigned retry_after_ms, unsigned jitter_ms) {
+    if (attempt < 1 || attempt >= 3) return 0;
+    if (retry_after_ms) return retry_after_ms > 30000 ? 30000 : retry_after_ms;
+    unsigned backoff = 500u << (attempt - 1);
+    return backoff + (jitter_ms % 251);
+}
+
 bool map_demo_result_matches(const map_demo_slot &slot, const map_demo_job &job) {
     return slot.state == 1 && slot.token == job.token &&
            slot.z == job.z && slot.x == job.x && slot.y == job.y;

@@ -57,7 +57,8 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
-- The Windows-only native map example now validates OpenFreeMap TileJSON with the MIT-licensed json11 parser instead of scanning raw strings, rejecting malformed zoom bounds and tile URLs; the C99 map widget has no new dependency. See [Native vector map](docs/map.md).
+- The Windows-only native map example validates OpenFreeMap TileJSON with the MIT-licensed json11 parser, rejecting malformed zoom bounds and tile URLs; the C99 core has no new JSON dependency. See [Native vector map](docs/map.md).
+- The Windows map demo now discards obsolete queued viewport work and late results, retries transient responses with capped backoff and `Retry-After`, and caps its decoded tile cache at 96 MiB/192 entries (with a separate eight-result backpressure queue). The map widget paints lightweight placeholders for missing tiles, reserves marker labels when placing names, and exposes decoded-tile owned-byte accounting.
 - **The file browser's sidebar lists drives and volumes**: drive letters with their labels on Windows, mounted data volumes on Linux and browsable volumes on macOS, under their own heading below Places. It scrolls, so custom `places` are no longer cut off after six, and Reload (F5) or reopening a file picker reads the drives again. The filter field now has the height of the path bar beside it ([#96](https://github.com/yappologistic/CUI/issues/96)).
 - **Renderers: a sixth shading mode**, `CUI_SHADE_DITHER`, for the dither components. A renderer of your own needs its few lines from the reference shader in [Rendering](docs/rendering.md) to draw them; everything else draws as before.
 - **Line charts take `stacked`**: each series sits on the ones before it, and the axis covers their sum. It used to apply to bar charts only.

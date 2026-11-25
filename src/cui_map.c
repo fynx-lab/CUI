@@ -17,6 +17,7 @@ typedef struct { float left, right; uint16_t row, height; } map_span;
 typedef struct { int kind, first, count, extent, span_first, span_count; char name[96], class_name[32]; } map_feature;
 struct cui_mvt_tile {
     uint8_t *bytes;
+    size_t byte_count;
     map_feature *features;
     map_path *paths;
     map_point *points;
@@ -240,6 +241,7 @@ cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size) {
     t->bytes = malloc(size);
     if (!t->bytes) { cui_mvt_tile_destroy(t); return NULL; }
     memcpy(t->bytes, bytes, size);
+    t->byte_count = size;
     map_pb p = {t->bytes, t->bytes + size}; int layers = 0;
     while (p.p < p.end) {
         unsigned id, wire; map_slice layer;
@@ -256,6 +258,12 @@ cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size) {
 bad:
     cui_mvt_tile_destroy(t);
     return NULL;
+}
+size_t cui_mvt_tile_memory_usage(const cui_mvt_tile *t) {
+    if (!t) return 0;
+    return sizeof *t + t->byte_count + (size_t)t->cfeatures * sizeof *t->features +
+           (size_t)t->cpaths * sizeof *t->paths + (size_t)t->cpoints * sizeof *t->points +
+           (size_t)t->cspans * sizeof *t->spans;
 }
 void cui_mvt_tile_destroy(cui_mvt_tile *t) {
     if (!t) return;
@@ -310,9 +318,29 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     cui_color roads = dark ? cui__rgba(137, 145, 145, 255) : cui__rgba(255, 255, 255, 255);
     cui_draw_rect(ui, bounds, CUI_CORNERS(0), land);
     int labels = 0; cui_rect used[MAP_LABELS];
+    double center_x = map_world_x(m->view.longitude, m->z);
+    double center_y = map_world_y(m->view.latitude, m->z);
+    double world_width = 256.0 * (1 << m->z);
+    /* Reserve marker labels first, so place names never paint underneath them. */
+    for (int i = 0; i < m->nmarkers && labels < MAP_LABELS; i++) {
+        const cui_map_marker *mark = &m->markers[i];
+        if (!mark->label || mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
+        double dx = map_wrap(map_world_x(mark->longitude, m->z) - center_x + world_width / 2, world_width) - world_width / 2;
+        cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, mark->label, -1);
+        used[labels++] = (cui_rect){bounds.x + bounds.w / 2 + (float)dx + 9,
+                                      bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) - center_y) - 7,
+                                      text.width, text.height};
+    }
     for (int i = 0; i < m->count; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
         cui_rect r = {bounds.x + m->refs[i].x, bounds.y + m->refs[i].y, 256, 256};
+        if (!t) {
+            cui_push_clip(ui, bounds);
+            cui_draw_rect(ui, r, CUI_CORNERS(0),
+                          dark ? cui__rgba(45, 54, 60, 255) : cui__rgba(224, 227, 218, 255));
+            cui_pop_clip(ui);
+            continue;
+        }
         cui_push_clip(ui, r);
         for (int pass = 1; pass <= 3; pass++) for (int j = 0; j < t->nfeatures; j++) {
             const map_feature *f = &t->features[j];
@@ -322,7 +350,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                 bool major = !strcmp(f->class_name, "motorway") || !strcmp(f->class_name, "trunk") ||
                              !strcmp(f->class_name, "primary") || !strcmp(f->class_name, "secondary");
                 if (f->kind == 2 && m->z < 9 && !major) continue;
-                float width = !strcmp(f->class_name, "motorway") ? 2.3f : major ? 1.3f : 0.65f;
+                float width = !strcmp(f->class_name, "motorway") ? (m->z >= 11 ? 2.8f : 2.3f) :
+                              major ? (m->z >= 11 ? 1.7f : 1.3f) : (m->z >= 12 ? 0.9f : 0.65f);
                 cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
                 map_road(ui, r, t, f, f->kind == 5 ? water : major ? roads : minor, width);
             }
@@ -331,13 +360,15 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     }
     for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
+        if (!t) continue;
         float ox = bounds.x + m->refs[i].x, oy = bounds.y + m->refs[i].y;
         for (int j = 0; j < t->nfeatures && labels < MAP_LABELS; j++) {
             const map_feature *f = &t->features[j];
             if (f->kind != 3 || !f->name[0] || !f->count) continue;
             map_point p = t->points[t->paths[f->first].first];
             cui_vec2 pos = {ox + (float)p.x * 256 / f->extent, oy + (float)p.y * 256 / f->extent};
-            cui_rect box = {pos.x, pos.y, (float)strlen(f->name) * 7.0f, 16};
+            cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
+            cui_rect box = {pos.x, pos.y, text.width, text.height};
             if (box.x < bounds.x || box.y < bounds.y || box.x + box.w > bounds.x + bounds.w || box.y + box.h > bounds.y + bounds.h) continue;
             bool overlap = false;
             for (int k = 0; k < labels; k++) if (box.x < used[k].x + used[k].w + 6 && box.x + box.w + 6 > used[k].x && box.y < used[k].y + used[k].h + 4 && box.y + box.h + 4 > used[k].y) { overlap = true; break; }
@@ -347,8 +378,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             }
         }
     }
-    double cx = map_world_x(m->view.longitude, m->z), cy = map_world_y(m->view.latitude, m->z);
-    double world = 256.0 * (1 << m->z);
+    double cx = center_x, cy = center_y;
+    double world = world_width;
     for (int i = 0; i < m->nmarkers; i++) {
         const cui_map_marker *mark = &m->markers[i];
         if (mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
@@ -444,7 +475,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
             for (int x = minx; x <= maxx && m->count < MAP_REFS; x++) {
                 int tx = (x % tiles + tiles) % tiles;
                 const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
-                if (!tile) { if (opts->request) opts->request(opts->tile_user, z, tx, y); continue; }
+                if (!tile) { if (opts->request) opts->request(opts->tile_user, z, tx, y); }
                 m->refs[m->count++] = (map_ref){tile, (float)(x * 256.0 - cx + r.rect.w / 2), (float)(y * 256.0 - cy + r.rect.h / 2)};
             }
         }

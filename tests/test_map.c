@@ -41,6 +41,8 @@ int main(int argc, char **argv) {
     map_fixture_buf b = map_fixture();
     cui_mvt_tile *t = cui_mvt_tile_decode(b.b, b.n);
     CHECK(t != NULL);
+    CHECK(cui_mvt_tile_memory_usage(NULL) == 0);
+    if (t) CHECK(cui_mvt_tile_memory_usage(t) >= b.n + sizeof(void *) * 5);
     CHECK(cui_mvt_tile_decode(NULL, 0) == NULL);
     CHECK(cui_mvt_tile_decode(b.b, 0) == NULL);
     CHECK(cui_mvt_tile_decode(b.b, 2 * 1024 * 1024 + 1) == NULL);

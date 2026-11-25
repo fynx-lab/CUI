@@ -25,6 +25,11 @@ int main() {
     CHECK(map_demo_result_matches(slots[1], replacement));
     CHECK(map_demo_cancel_stale(slots, 3, queue, 4, head, tail, count, 43) == 2);
     CHECK(count == 0 && head == tail);
+    CHECK(map_demo_retry_delay_ms(1, 0, 0) == 500);
+    CHECK(map_demo_retry_delay_ms(2, 0, 250) == 1250);
+    CHECK(map_demo_retry_delay_ms(1, 12000, 0) == 12000);
+    CHECK(map_demo_retry_delay_ms(1, 120000, 0) == 30000);
+    CHECK(map_demo_retry_delay_ms(3, 0, 0) == 0);
     std::fprintf(stderr, "map demo jobs tests: %s\n", errors ? "FAILED" : "OK");
     return errors ? 1 : 0;
 }

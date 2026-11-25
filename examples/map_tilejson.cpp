@@ -35,7 +35,10 @@ bool map_parse_tilejson(const std::string &text, map_tilejson &out, std::string 
     }
     const std::string path = url.substr(origin.size());
     const size_t at = path.find(suffix);
-    if (at == std::string::npos || at <= std::string("/planet/").size() || at + suffix.size() != path.size() ||
+    const std::string version = at == std::string::npos ? std::string() : path.substr(8, at - 8);
+    if (at == std::string::npos || version.empty() || version == "." || version == ".." ||
+        version.find('/') != std::string::npos || version.find('{') != std::string::npos ||
+        version.find('}') != std::string::npos || at + suffix.size() != path.size() ||
         path.find("{z}") != at + 1 || path.find("{x}") != at + 5 || path.find("{y}") != at + 9) {
         error = "Tile URL coordinate template is unsupported"; return false;
     }

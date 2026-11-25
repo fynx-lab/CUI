@@ -284,6 +284,10 @@ int main(void) {
     desc.height = getenv("CUI_MAP_DEMO_SMALL") ? 360 : 680;
     desc.min_width = 450; desc.min_height = 360;
     desc.theme = CUI_THEME_DARK;
+    /* Dense vector geometry can make the default GL driver's staging buffers
+     * dwarf the decoded-tile cache. Keep this example's memory predictable;
+     * CUI's renderer default and map widget are unchanged. */
+    desc.renderer = getenv("CUI_MAP_DEMO_GL") ? CUI_RENDERER_AUTO : CUI_RENDERER_SOFTWARE;
     desc.continuous = getenv("CUI_SCREENSHOT") != NULL;
     cui_app *app = d->available && d->stop_event ? cui_app_create(&desc) : NULL;
     if (!app) { if (d->available) CloseHandle(d->available); if (d->stop_event) CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock); free(d); return 1; }

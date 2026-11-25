@@ -280,7 +280,9 @@ int main(void) {
     d->stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     cui_app_desc desc = {};
     desc.title = "CUI native vector map (OpenFreeMap)";
-    desc.width = 1000; desc.height = 680; desc.min_width = 450; desc.min_height = 360;
+    desc.width = getenv("CUI_MAP_DEMO_SMALL") ? 460 : 1000;
+    desc.height = getenv("CUI_MAP_DEMO_SMALL") ? 360 : 680;
+    desc.min_width = 450; desc.min_height = 360;
     desc.theme = CUI_THEME_DARK;
     desc.continuous = getenv("CUI_SCREENSHOT") != NULL;
     cui_app *app = d->available && d->stop_event ? cui_app_create(&desc) : NULL;
@@ -309,22 +311,22 @@ int main(void) {
         cui_box root = {}, header = {}, footer = {};
         root.width = CUI_FILL; root.height = CUI_FILL;
         header.pad = 12; header.gap = 16; header.width = CUI_FILL;
-        footer.pad = 10; footer.gap = 16; footer.width = CUI_FILL;
+        footer.pad = 10; footer.gap = 4; footer.width = CUI_FILL;
         cui_column_begin(ui, &root);
         cui_row_begin(ui, &header);
-        cui_heading(ui, "Native vector map", 3);
+        cui_heading(ui, "Vector map", 3);
         if (d->tilejson == 0) cui_secondary(ui, "Connecting to OpenFreeMap...");
         else if (d->tilejson < 0) {
             cui_secondary(ui, (d->last_status == 429 || d->last_status == 503) ? "OpenFreeMap is throttling requests." :
                               d->last_status == 200 ? "Invalid TileJSON from tile service." :
                               "Tile service unavailable.");
-            if (cui_button_ex(ui, "Retry connection", nullptr)) { d->tilejson = 0; queue_job(d, first); }
+            if (cui_button_ex(ui, "Retry", nullptr)) { d->tilejson = 0; queue_job(d, first); }
         } else if (d->failures) {
             cui_textf(ui, "%d tiles unavailable%s", d->failures,
                       (d->last_status == 429 || d->last_status == 503) ? " (throttled)" :
                       d->last_status == 507 ? " (cache full)" :
                       d->last_status == 200 ? " (invalid tile)" : " (network error)");
-            if (cui_button_ex(ui, "Retry tiles", nullptr)) {
+            if (cui_button_ex(ui, "Retry", nullptr)) {
                 for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
                 d->failures = 0;
             }
@@ -347,9 +349,9 @@ int main(void) {
             if (d->tiles[i].state == 2) d->loaded++;
         }
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
-        cui_row_begin(ui, &footer);
+        cui_column_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
-        cui_textf(ui, "Cache %.1f / 96 MiB · %llu hits / %llu misses",
+        cui_textf(ui, "Cache %.1f/96 MiB · H%llu/M%llu",
                   (double)d->cache_bytes / (1024 * 1024), d->hits, d->misses);
         if (d->selected >= 0) cui_textf(ui, "Marker: %s", markers[d->selected].label);
         cui_box_end(ui);

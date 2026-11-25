@@ -5135,6 +5135,35 @@ CUI_API void cui_wheel_region(cui_ctx *ui, cui_id id, cui_rect rect);
  * disabled scope: call it in the scope the canvas was built in. */
 CUI_API bool cui_wheel_take(cui_ctx *ui, cui_id id, cui_vec2 *delta);
 
+/* Native, provider-neutral Mapbox Vector Tile map. Decode uncompressed MVT
+ * bytes off the UI thread; tiles returned by lookup and marker labels must
+ * remain valid until cui_end_frame. request only enqueues a missing tile, and
+ * may be called repeatedly; the host owns networking, caching and attribution.
+ * The first renderer supports water, roads and settlement names from the
+ * OpenMapTiles schema, not full MapLibre styles. */
+typedef struct cui_mvt_tile cui_mvt_tile;
+CUI_API cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size);
+CUI_API void cui_mvt_tile_destroy(cui_mvt_tile *tile);
+typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_view;
+typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;
+typedef const cui_mvt_tile *(*cui_map_tile_lookup)(void *user, int z, int x, int y);
+typedef void (*cui_map_tile_request)(void *user, int z, int x, int y);
+typedef struct cui_map_opts {
+    int _;
+    cui_size width, height;             /* zero means CUI_FILL */
+    cui_map_tile_lookup lookup;          /* nonblocking; NULL means not ready */
+    cui_map_tile_request request;        /* nonblocking; deduplicate in the host */
+    void *tile_user;
+    const cui_map_marker *markers;
+    int marker_count;
+    int min_zoom, max_zoom;             /* zero defaults: 0..14 */
+} cui_map_opts;
+typedef struct cui_map_result {
+    bool view_changed;
+    int hovered_marker, clicked_marker; /* -1 when absent; marker ids must be nonnegative */
+} cui_map_result;
+CUI_API cui_map_result cui_map_ex(cui_ctx *ui, const char *id, cui_map_view *view, const cui_map_opts *opts);
+
 /* Persistent per-id storage for your own components (zeroed on first use).
  * State not used for about 300 frames is freed (and zeroed again if it comes
  * back), so it suits what can be rebuilt. For resources held in it, such as
@@ -5429,6 +5458,7 @@ CUI_API const cui_draw_data *cui_get_draw_data(cui_ctx *ui);
 #define cui_presence_pill(ui, id, users, n, ...) cui_presence_pill_ex((ui), (id), (users), (n), CUI__OPTS(cui_presence_pill_opts, __VA_ARGS__))
 #define cui_selection_ring(ui, color, ...)  cui_selection_ring_ex((ui), (color), CUI__OPTS(cui_selection_ring_opts, __VA_ARGS__))
 #define cui_canvas_controls(ui, id, view, ...) cui_canvas_controls_ex((ui), (id), (view), CUI__OPTS(cui_canvas_controls_opts, __VA_ARGS__))
+#define cui_map(ui, id, view, ...) cui_map_ex((ui), (id), (view), CUI__OPTS(cui_map_opts, __VA_ARGS__))
 #define cui_result_card(ui, id, image, title, ...) cui_result_card_ex((ui), (id), (image), (title), CUI__OPTS(cui_result_card_opts, __VA_ARGS__))
 #define cui_selection_bar(ui, id, count, actions, n, ...) cui_selection_bar_ex((ui), (id), (count), (actions), (n), CUI__OPTS(cui_selection_bar_opts, __VA_ARGS__))
 #endif /* !__cplusplus */

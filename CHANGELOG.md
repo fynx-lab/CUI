@@ -6,6 +6,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Added
 
+- An experimental, native `cui_map` widget draws bounded MVT vector tiles with pan/zoom, water fills (including holes), basic roads and labels, and caller-provided markers. Networking stays with the host; the fork includes an offline gallery fixture and a Windows-only online OpenFreeMap example with visible attribution. See [Native vector map](docs/map.md).
 - Chart annotations take a `color` of their own, a theme token or any color, for the line, the dot and the label, so a low, a high and a target can each have theirs; without it `accent` decides as before. Line and bar charts take `.x_min` and `.x_max`, what the first and last point stand for, and then an annotation's x is in those units instead of the point's index, as in the dot chart. See [Chart annotations](docs/components-more.md#chart-annotations).
 - Tree table drag and drop: `.draggable` lets rows drag to move nodes, before, after or into a folder, with a drop line or outline, a ghost with a count, edge scrolling, folders that open while you hold the drag over them, and Esc to cancel. The table reports the drop in `cui_tree_table_events` (`dropped`, `drop_target`, `drop_where`), `.can_drop` refuses places, and `cui_tree_move` relinks the nodes. Try it on the gallery's *Files* page. See [Dragging rows](docs/components-more.md#dragging-rows).
 - `CUI_PLATFORM=wayland` requires native Wayland through SDL2 without falling back to X11. Linux `auto` is unchanged.

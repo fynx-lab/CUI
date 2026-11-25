@@ -1,5 +1,6 @@
 /* Extended gallery pages. Each page keeps its own state in statics. */
 #include "gallery_more.h"
+#include "map_fixture.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -2078,6 +2079,24 @@ static void page_voice(cui_ctx *ui) {
 
 /* ---- registry ------------------------------------------------------------ */
 
+static const cui_mvt_tile *map_fixture_lookup(void *user, int z, int x, int y) {
+    return z == 0 && x == 0 && y == 0 ? *(cui_mvt_tile **)user : NULL;
+}
+static void page_map(cui_ctx *ui) {
+    section(ui, "Native vector map", "An offline, generated MVT tile: drag to pan, use the wheel or arrow keys to navigate. The interior hole stays land-colored.");
+    static cui_mvt_tile *tile;
+    static cui_map_view view = {0, 0, 0};
+    static const cui_map_marker markers[] = {{0, 0, 0, "Sample point"}};
+    if (!tile) { map_fixture_buf b = map_fixture(); tile = cui_mvt_tile_decode(b.b, b.n); }
+    if (!tile) { cui_muted(ui, "Map fixture unavailable."); return; }
+    cui_box(ui, .width = CUI_FILL, .height = CUI_PX(320)) {
+        cui_map(ui, "fixture-map", &view, .width = CUI_FILL, .height = CUI_FILL,
+                .lookup = map_fixture_lookup, .tile_user = &tile,
+                .markers = markers, .marker_count = 1);
+    }
+    cui_muted(ui, "Synthetic geometry only; the online OpenFreeMap demo is a separate Windows example.");
+}
+
 typedef struct { const char *name, *icon; void (*fn)(cui_ctx *ui); } more_page;
 
 static const more_page pages[] = {
@@ -2102,6 +2121,7 @@ static const more_page pages[] = {
     { "Creative controls", CUI_ICON_PALETTE, page_creative },
     { "Canvas and bars", CUI_ICON_LAYERS, page_canvas },
     { "Voice", CUI_ICON_MIC, page_voice },
+    { "Native map", CUI_ICON_GLOBE, page_map },
 };
 
 int gallery_more_count(void) { return (int)(sizeof pages / sizeof pages[0]); }

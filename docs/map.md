@@ -1,0 +1,26 @@
+# Native vector map (experimental fork feature)
+
+`cui_map_ex` draws a native, flat Web Mercator map from **uncompressed Mapbox Vector Tiles (MVT 2.1)**. It has no URL, provider, HTTP client, offline store or EXIF dependency. The caller owns the view and tile cache; CUI handles clipping, wheel and drag input, keyboard navigation and drawing. See the [offline gallery](../examples/gallery_more.c) and the Windows [live OpenFreeMap example](../examples/map_online_win32.c).
+
+![Offline map fixture, light theme](images/components/native-map-light.png)
+![Offline map fixture, dark theme](images/components/native-map-dark.png)
+
+## Smallest host
+
+```c
+/* `cache_find` returns a decoded tile or NULL; `queue_visible_tile` never
+   blocks and deduplicates outstanding requests. Host-owned view persists. */
+cui_map_view view = {52.52, 13.405, 8};
+/* In a frame, inside a layout scope: */
+cui_map_result hit = cui_map(ui, "map", &view,
+    .width = CUI_FILL, .height = CUI_PX(420),
+    .lookup = cache_find, .request = queue_visible_tile, .tile_user = &cache,
+    .markers = markers, .marker_count = marker_count, .max_zoom = 14);
+if (hit.clicked_marker >= 0) select_marker(hit.clicked_marker);
+```
+
+Use `cui_mvt_tile_decode(data, length)` on uncompressed PBF data (a pure, bounded C99 function). It copies its input: release the downloaded bytes afterward, keep the returned tile until at least the end of the frame in which `lookup` returned it, then call `cui_mvt_tile_destroy`. Network/decompression, retry, request deduplication and cache eviction belong in the host. Keep marker labels and arrays valid through `cui_end_frame`; marker ids are nonnegative and `-1` means no hit. On a completed download, hand the parsed tile to the UI thread and request a redraw there. `lookup` and `request` execute synchronously during frame construction: **never wait for the network** in either callback. They are called only for visible tiles (with one extra tile of border while dragging).
+
+Initial rendering supports theme-colored land and landcover, water polygons (including holes), transportation and waterway lines, a small budget of `place` names, and supplied markers. Zoom steps are integral from 0 to 14 by default; `min_zoom` and `max_zoom` override them. Pointer drag pans, wheel zooms around the pointer; focus the map and use arrow keys or `+`/`-` to navigate. All geometry and names originate in tile data; **this is not a full MapLibre style engine** (no expressions, imported fonts/glyphs, sprites, buildings, hill shading or language-specific label rules). Limit of 2 MiB uncompressed input and bounded feature/geometry allocations: rejected tiles return NULL. The example reports download failures separately and offers an explicit retry.
+
+For the Windows online example, build `map_online_win32` with `CUI_BUILD_EXAMPLES=ON`, then run it. It fetches OpenFreeMap's `https://tiles.openfreemap.org/planet` TileJSON and its current versioned `.pbf` template using WinHTTP workers (at most four requests at a time), with a bounded RAM-only cache and a visible `OpenFreeMap © OpenMapTiles Data from OpenStreetMap` attribution. It has no API key or offline bulk mode. Set `CUI_MAP_DEMO_OFFLINE=1` to exercise the failure UI without fetching data. The provider is external and has [usage terms](https://openfreemap.org/tos/) and no service-level guarantee; the CUI core does not take responsibility for connectivity, licensing or attribution. On other platforms, the reusable widget and offline gallery still compile; port the transport adapter to your platform as needed.

@@ -1,0 +1,262 @@
+/* OpenFreeMap is a data source, not a CUI dependency. This Win32 example
+ * fetches TileJSON and only visible MVT tiles, with a bounded RAM cache. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winhttp.h>
+#include <cui/cui.h>
+#include <cui/cui_app.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define SLOTS 192
+#define QUEUE 64
+#define WORKERS 4
+#define BODY_CAP (2 * 1024 * 1024)
+typedef struct { int z, x, y, state; unsigned used; cui_mvt_tile *tile; } slot;
+typedef struct { int z, x, y; char path[240]; } job;
+typedef struct { int z, x, y, ok; char *json; cui_mvt_tile *tile; } result;
+typedef struct {
+    CRITICAL_SECTION lock;
+    HANDLE available, threads[WORKERS];
+    HWND window; bool stopping;
+    job jobs[QUEUE]; int jhead, jtail, jcount;
+    result results[QUEUE + WORKERS]; int rhead, rtail, rcount;
+    slot tiles[SLOTS]; unsigned frame;
+    char template_path[240]; int tilejson; int failures, selected;
+    cui_map_view view;
+} demo;
+
+static void queue_job(demo *d, job item) {
+    EnterCriticalSection(&d->lock);
+    if (d->jcount < QUEUE && !d->stopping) {
+        d->jobs[d->jtail] = item; d->jtail = (d->jtail + 1) % QUEUE; d->jcount++;
+        ReleaseSemaphore(d->available, 1, NULL);
+    }
+    LeaveCriticalSection(&d->lock);
+}
+static int fetch(const char *path, char **out, int cap) {
+    int n = -1; *out = NULL;
+    wchar_t wide[256];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 256)) return -1;
+    HINTERNET session = WinHttpOpen(L"CUI-Map-Demo/0.1 (+https://github.com/fynx-lab/CUI)",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connect = NULL, request = NULL;
+    if (!session) return -1;
+    WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+    connect = WinHttpConnect(session, L"tiles.openfreemap.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connect) goto done;
+    request = WinHttpOpenRequest(connect, L"GET", wide, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!request) goto done;
+    DWORD flags = WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_DECOMPRESSION, &flags, sizeof flags)) goto done;
+    flags = WINHTTP_DISABLE_REDIRECTS;
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &flags, sizeof flags)) goto done;
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) goto done;
+    DWORD code = 0, len = sizeof code;
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &code, &len, WINHTTP_NO_HEADER_INDEX) || code != 200) goto done;
+    char *bytes = malloc((size_t)cap + 1);
+    if (!bytes) goto done;
+    n = 0;
+    for (;;) {
+        DWORD read = 0;
+        if (!WinHttpReadData(request, bytes + n, (DWORD)(cap + 1 - n), &read)) { n = -1; break; }
+        if (!read) break;
+        n += (int)read;
+        if (n > cap) { n = -1; break; }
+    }
+    if (n > 0) { bytes[n] = 0; *out = bytes; }
+    else { free(bytes); n = -1; }
+done:
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return n;
+}
+static DWORD WINAPI worker(void *arg) {
+    demo *d = arg;
+    for (;;) {
+        WaitForSingleObject(d->available, INFINITE);
+        EnterCriticalSection(&d->lock);
+        if (d->stopping) { LeaveCriticalSection(&d->lock); return 0; }
+        if (!d->jcount) { LeaveCriticalSection(&d->lock); continue; }
+        job j = d->jobs[d->jhead]; d->jhead = (d->jhead + 1) % QUEUE; d->jcount--;
+        LeaveCriticalSection(&d->lock);
+        char *bytes = NULL;
+        int n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP);
+        result r = {j.z, j.x, j.y, n > 0, NULL, NULL};
+        if (j.z < 0) r.json = bytes;
+        else { if (n > 0) r.tile = cui_mvt_tile_decode(bytes, (size_t)n); r.ok = r.tile != NULL; free(bytes); }
+        /* A slow UI frame can finish more than 68 jobs before it drains the
+         * result queue. Never drop a result and strand its slot as pending. */
+        for (;;) {
+            EnterCriticalSection(&d->lock);
+            if (d->stopping) {
+                LeaveCriticalSection(&d->lock);
+                free(r.json); cui_mvt_tile_destroy(r.tile);
+                break;
+            }
+            if (d->rcount < QUEUE + WORKERS) {
+                d->results[d->rtail] = r; d->rtail = (d->rtail + 1) % (QUEUE + WORKERS); d->rcount++;
+                PostMessageW(d->window, WM_APP + 18, 0, 0);
+                LeaveCriticalSection(&d->lock);
+                break;
+            }
+            LeaveCriticalSection(&d->lock);
+            PostMessageW(d->window, WM_APP + 18, 0, 0);
+            Sleep(5);
+        }
+    }
+}
+/* Only accept a versioned tile path at OpenFreeMap's HTTPS host. TileJSON
+ * supplies this path, never a compiled-in, potentially stale timestamp. */
+static bool template_from_json(demo *d, const char *json) {
+    const char *list = strstr(json, "\"tiles\"");
+    if (!list || !(list = strchr(list, '[')) || !(list = strchr(list, '"'))) return false;
+    const char *end = strchr(++list, '"');
+    static const char prefix[] = "https://tiles.openfreemap.org/planet/";
+    if (!end || (size_t)(end - list) >= 239 || strncmp(list, prefix, sizeof prefix - 1)) return false;
+    const char *path = list + sizeof prefix - 1;
+    if (!strstr(path, "/{z}/{x}/{y}.pbf") || strstr(path, "/{z}/{x}/{y}.pbf") >= end) return false;
+    for (const char *p = path; p < end; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '/' || *p == '_' || *p == '-' || *p == '.' || *p == '{' || *p == '}')) return false;
+    d->template_path[0] = '/'; memcpy(d->template_path + 1, "planet/", 7);
+    size_t n = (size_t)(end - path);
+    if (n + 8 >= sizeof d->template_path) return false;
+    memcpy(d->template_path + 8, path, n); d->template_path[8 + n] = 0;
+    return true;
+}
+static void pump(demo *d) {
+    result results[QUEUE + WORKERS]; int count = 0;
+    EnterCriticalSection(&d->lock);
+    while (d->rcount) {
+        results[count++] = d->results[d->rhead];
+        d->rhead = (d->rhead + 1) % (QUEUE + WORKERS); d->rcount--;
+    }
+    LeaveCriticalSection(&d->lock);
+    for (int i = 0; i < count; i++) {
+        result *r = &results[i];
+        if (r->z < 0) {
+            d->tilejson = r->ok && template_from_json(d, r->json) ? 1 : -1;
+            free(r->json);
+        } else {
+            slot *s = NULL;
+            for (int k = 0; k < SLOTS; k++) if (d->tiles[k].state == 1 && d->tiles[k].z == r->z && d->tiles[k].x == r->x && d->tiles[k].y == r->y) { s = &d->tiles[k]; break; }
+            if (s) { s->tile = r->tile; s->state = r->ok ? 2 : 3; if (!r->ok) d->failures++; }
+            else cui_mvt_tile_destroy(r->tile);
+        }
+    }
+}
+static slot *find(demo *d, int z, int x, int y) {
+    for (int i = 0; i < SLOTS; i++) {
+        slot *s = &d->tiles[i];
+        if (s->state && s->z == z && s->x == x && s->y == y) return s;
+    }
+    return NULL;
+}
+static const cui_mvt_tile *tile_lookup(void *user, int z, int x, int y) {
+    demo *d = user; slot *s = find(d, z, x, y);
+    if (s) { s->used = d->frame; return s->tile; }
+    return NULL;
+}
+static void tile_request(void *user, int z, int x, int y) {
+    demo *d = user;
+    if (d->tilejson != 1 || find(d, z, x, y)) return;
+    int index = -1; unsigned oldest = ~0u;
+    for (int i = 0; i < SLOTS; i++) {
+        slot *s = &d->tiles[i];
+        if (!s->state) { index = i; break; }
+        if (s->state != 1 && s->used != d->frame && s->used < oldest) { oldest = s->used; index = i; }
+    }
+    if (index < 0) return;
+    slot *s = &d->tiles[index];
+    char path[240]; const char *token = strstr(d->template_path, "{z}/{x}/{y}");
+    if (!token) return;
+    int prefix = (int)(token - d->template_path);
+    int n = snprintf(path, sizeof path, "%.*s%d/%d/%d%s", prefix, d->template_path, z, x, y, token + 11);
+    if (n < 0 || n >= (int)sizeof path) return;
+    /* Enqueue before replacing the slot: if saturated, try on the next frame. */
+    EnterCriticalSection(&d->lock);
+    bool space = d->jcount < QUEUE && !d->stopping;
+    LeaveCriticalSection(&d->lock);
+    if (!space) return;
+    cui_mvt_tile_destroy(s->tile);
+    *s = (slot){z, x, y, 1, d->frame, NULL};
+    job j = {z, x, y, ""}; memcpy(j.path, path, (size_t)n + 1);
+    queue_job(d, j);
+}
+static void stop(demo *d) {
+    EnterCriticalSection(&d->lock); d->stopping = true; LeaveCriticalSection(&d->lock);
+    for (int i = 0; i < WORKERS; i++) ReleaseSemaphore(d->available, 1, NULL);
+    WaitForMultipleObjects(WORKERS, d->threads, TRUE, INFINITE);
+    for (int i = 0; i < WORKERS; i++) CloseHandle(d->threads[i]);
+    CloseHandle(d->available); DeleteCriticalSection(&d->lock);
+    for (int i = 0; i < SLOTS; i++) cui_mvt_tile_destroy(d->tiles[i].tile);
+    while (d->rcount) {
+        result *r = &d->results[d->rhead]; free(r->json); cui_mvt_tile_destroy(r->tile);
+        d->rhead = (d->rhead + 1) % (QUEUE + WORKERS); d->rcount--;
+    }
+}
+int main(void) {
+    demo *d = calloc(1, sizeof *d);
+    if (!d) return 1;
+    d->view = (cui_map_view){52.52, 13.405, 8}; d->selected = -1;
+    InitializeCriticalSection(&d->lock);
+    d->available = CreateSemaphoreW(NULL, 0, QUEUE + WORKERS, NULL);
+    cui_app_desc desc = {.title = "CUI native vector map (OpenFreeMap)", .width = 1000, .height = 680,
+                         .min_width = 450, .min_height = 360, .theme = CUI_THEME_DARK};
+    desc.continuous = getenv("CUI_SCREENSHOT") != NULL;
+    cui_app *app = d->available ? cui_app_create(&desc) : NULL;
+    if (!app) { if (d->available) CloseHandle(d->available); DeleteCriticalSection(&d->lock); free(d); return 1; }
+    d->window = (HWND)cui_app_native_window(app);
+    int started = 0;
+    for (; started < WORKERS; started++) {
+        d->threads[started] = CreateThread(NULL, 0, worker, d, 0, NULL);
+        if (!d->threads[started]) break;
+    }
+    if (started != WORKERS) {
+        EnterCriticalSection(&d->lock); d->stopping = true; LeaveCriticalSection(&d->lock);
+        for (int i = 0; i < started; i++) ReleaseSemaphore(d->available, 1, NULL);
+        if (started) WaitForMultipleObjects(started, d->threads, TRUE, INFINITE);
+        for (int i = 0; i < started; i++) CloseHandle(d->threads[i]);
+        CloseHandle(d->available); DeleteCriticalSection(&d->lock); cui_app_destroy(app); free(d); return 1;
+    }
+    job first = {-1, 0, 0, "/planet"};
+    if (getenv("CUI_MAP_DEMO_OFFLINE")) d->tilejson = -1; /* deterministic failure-state smoke test */
+    else queue_job(d, first);
+    const cui_map_marker markers[] = {{0, 52.52, 13.405, "Berlin"}, {1, 48.8566, 2.3522, "Paris"}};
+    while (cui_app_frame(app)) {
+        cui_ctx *ui = cui_app_ui(app);
+        pump(d); d->frame++;
+        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL, .gap = 0) {
+            cui_row(ui, .pad = 12, .gap = 16, .width = CUI_FILL) {
+                cui_heading(ui, "Native vector map", 3);
+                if (d->tilejson == 0) cui_secondary(ui, "Connecting to OpenFreeMap...");
+                else if (d->tilejson < 0) {
+                    cui_secondary(ui, "Tile service unavailable.");
+                    if (cui_button(ui, "Retry connection")) { d->tilejson = 0; queue_job(d, first); }
+                } else if (d->failures) {
+                    cui_textf(ui, "%d tiles unavailable", d->failures);
+                    if (cui_button(ui, "Retry tiles")) {
+                        for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
+                        d->failures = 0;
+                    }
+                } else cui_secondary(ui, "Drag to pan  ·  Wheel to zoom  ·  Arrow keys to move");
+            }
+            cui_map_result hit = cui_map(ui, "online-map", &d->view,
+                .lookup = tile_lookup, .request = tile_request, .tile_user = d,
+                .markers = markers, .marker_count = 2, .min_zoom = 0, .max_zoom = 14);
+            if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
+            cui_row(ui, .pad = 10, .gap = 16, .width = CUI_FILL) {
+                cui_text(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap");
+                if (d->selected >= 0) cui_textf(ui, "Marker: %s", markers[d->selected].label);
+            }
+        }
+    }
+    stop(d); cui_app_destroy(app); free(d);
+    return 0;
+}

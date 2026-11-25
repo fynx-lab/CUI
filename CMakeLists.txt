@@ -79,6 +79,7 @@ set(CUI_CORE_SOURCES
     src/cui_devviews.c
     src/cui_instrument.c
     src/cui_canvas.c
+    src/cui_map.c
     src/cui_tour.c
     src/cui_photo.c
     src/cui_creative.c

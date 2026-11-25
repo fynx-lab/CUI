@@ -5,7 +5,7 @@
 3. [Building an app](apps.md): the window, when frames happen, what components return, threads, shipping
 4. [Recipes](recipes.md): complete programs for a form, a sorted table, a list with a detail pane, a background task, a clock and saved settings
 5. [Layout](layout.md): rows, columns, sizes, alignment, grids, scrolling and split views
-6. [Components](components.md) and [More components](components-more.md): every component, what it is, its options and keyboard support
+6. [Components](components.md), [More components](components-more.md), and [Native vector map](map.md): components, options and keyboard support
 7. [Theming](theming.md): tokens, light and dark, accents, fonts and motion
 8. [Icons](icons.md): the built-in Lucide icons and using any other icon
 9. [Custom components](custom-components.md): canvas, drawing, state and animation

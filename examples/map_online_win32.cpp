@@ -12,11 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SLOTS 192
+#define SLOTS 384
 #define QUEUE 64
 #define RESULT_QUEUE 8
-#define CACHE_BUDGET (96u * 1024u * 1024u)
-#define RASTER_BUDGET (48u * 1024u * 1024u)
+#define CACHE_BUDGET (192u * 1024u * 1024u)
+#define RASTER_BUDGET (96u * 1024u * 1024u)
 #define WORKERS 4
 #define BODY_CAP (2 * 1024 * 1024)
 typedef map_demo_slot slot;
@@ -555,7 +555,7 @@ int main(void) {
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
         cui_column_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
-        cui_textf(ui, "z%d · Cache %.1f/96 MiB · Raster %.1f/48 MiB · H%llu/M%llu",
+        cui_textf(ui, "z%d · Cache %.1f/192 MiB · Raster %.1f/96 MiB · H%llu/M%llu",
                   (int)d->view.zoom, (double)d->cache_bytes / (1024 * 1024),
                   (double)d->raster_bytes / (1024 * 1024), d->hits, d->misses);
         bool shown_failure = false;

@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Fix decoding of valid MVT water polygons with rings longer than 2048 points: reject only when the number of actual intersections on a single scanline exceeds the bounded buffer. Reproduced with OpenFreeMap `z6/53/29` (HTTP 200, 74,137-byte PBF); no network or JSON dependency added to C99 core.
 - The Windows map demo shows current zoom and the coordinates/reason for a visible failed tile. Transient network/429/5xx tile failures receive up to two spaced, visibility-gated retries after worker attempts are exhausted; permanent failures stay behind the explicit Retry action.
 - Low-zoom maps now draw a thinner, zoom-dependent subset of major roads (motorway/trunk at z0–6, plus primary at z7–8, secondary at z9–10); waterway lines are suppressed through z8.
 - Map dragging temporarily omits minor roads, landcover and waterways during movement, restoring full detail on mouse release; this avoids rebuilding dense geometry for every pointer update without changing requests or the normal view.

@@ -7,6 +7,42 @@
 #include <string.h>
 #include "../examples/map_fixture.h"
 static int failures;
+/* A long polygon edge is valid even when its vertex count exceeds the
+ * per-scanline crossing budget; only actual crossings consume that budget. */
+typedef struct { unsigned char b[16384]; size_t n; } long_pb;
+static void long_var(long_pb *p, unsigned v) {
+    while (v >= 128) { p->b[p->n++] = (unsigned char)(v | 128); v >>= 7; }
+    p->b[p->n++] = (unsigned char)v;
+}
+static void long_field(long_pb *p, unsigned id, unsigned v) {
+    long_var(p, id << 3); long_var(p, v);
+}
+static void long_nested(long_pb *p, unsigned id, const void *data, size_t n) {
+    long_var(p, (id << 3) | 2); long_var(p, (unsigned)n);
+    memcpy(p->b + p->n, data, n); p->n += n;
+}
+static void long_coord(long_pb *p, int v) {
+    long_var(p, ((unsigned)v << 1) ^ (unsigned)(v >> 31));
+}
+static cui_mvt_tile *long_water_tile(void) {
+    long_pb geom = {{0}, 0}, feature = {{0}, 0}, layer = {{0}, 0}, tile = {{0}, 0};
+    long_var(&geom, 9); long_coord(&geom, 0); long_coord(&geom, 0);
+    long_var(&geom, (2102u << 3) | 2); /* 2100 top-edge points, two bottom corners */
+    int x = 0;
+    for (int i = 0; i < 2100; i++) {
+        int next = (i + 1) * 4096 / 2100;
+        long_coord(&geom, next - x); long_coord(&geom, 0); x = next;
+    }
+    long_coord(&geom, 0); long_coord(&geom, 4096);
+    long_coord(&geom, -4096); long_coord(&geom, 0);
+    long_var(&geom, 15);
+    long_field(&feature, 3, 3); long_nested(&feature, 4, geom.b, geom.n);
+    long_nested(&layer, 1, "water", 5); long_nested(&layer, 2, feature.b, feature.n);
+    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
+    long_nested(&tile, 3, layer.b, layer.n);
+    return cui_mvt_tile_decode(tile.b, tile.n);
+}
+
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
 typedef struct { cui_mvt_tile *tile; cui_map_view view; int requests; cui_map_result last; } scene;
 static const cui_mvt_tile *bench_lookup(void *user, int z, int x, int y) {
@@ -172,6 +208,9 @@ int main(int argc, char **argv) {
         }
         cui_mvt_tile_destroy(park);
     }
+    cui_mvt_tile *long_tile = long_water_tile();
+    CHECK(long_tile != NULL);
+    cui_mvt_tile_destroy(long_tile);
     CHECK(road_vertices(6, "motorway") > road_vertices(6, "primary"));
     CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
     CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));

@@ -209,11 +209,14 @@ static bool map_build_spans(cui_mvt_tile *t, map_feature *f) {
         int n = 0; float y = (row + 0.5f) * f->extent / 256.0f;
         for (int j = 0; j < f->count; j++) {
             map_path path = t->paths[f->first + j];
-            if (path.count > MAP_CROSSINGS || n + path.count > MAP_CROSSINGS) return false;
+            /* A ring may contain thousands of points yet cross this scanline
+             * only a few times. Bound the actual crossings, not ring length. */
             for (int k = 0; k < path.count; k++) {
                 map_point a = t->points[path.first + k], b = t->points[path.first + (k + 1) % path.count];
-                if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y))
+                if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) {
+                    if (n == MAP_CROSSINGS) return false;
                     xs[n++] = a.x + (y - a.y) * (b.x - a.x) / (float)(b.y - a.y);
+                }
             }
         }
         qsort(xs, (size_t)n, sizeof *xs, map_compare_float);

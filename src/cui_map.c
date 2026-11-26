@@ -8,7 +8,9 @@
  * during decode, so the host can parse on a worker before handing off a tile. */
 enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
        MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 16384,
-       MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABELS = 64, MAP_CROSSINGS = 2048 };
+       MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABEL_COLS = 12,
+       MAP_LABEL_ROWS = 8, MAP_LABELS = MAP_LABEL_COLS * MAP_LABEL_ROWS * 2,
+       MAP_CROSSINGS = 2048 };
 typedef struct { const uint8_t *p; size_t n; } map_slice;
 typedef struct { const uint8_t *p, *end; } map_pb;
 typedef struct { int32_t x, y; } map_point;
@@ -398,24 +400,40 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_pop_clip(ui);
         } else map_draw_base(ui, t, r, m->z, m->dragging);
     }
-    for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
-        const cui_mvt_tile *t = m->refs[i].tile;
-        if (!t) continue;
-        float ox = bounds.x + m->refs[i].x, oy = bounds.y + m->refs[i].y;
-        for (int j = 0; j < t->nfeatures && labels < MAP_LABELS; j++) {
-            const map_feature *f = &t->features[j];
-            if (f->kind != 3 || !f->name[0] || !f->count) continue;
-            map_point p = t->points[t->paths[f->first].first];
-            cui_vec2 pos = {ox + (float)p.x * m->refs[i].size / f->extent,
-                            oy + (float)p.y * m->refs[i].size / f->extent};
-            cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
-            cui_rect box = {pos.x, pos.y, text.width, text.height};
-            if (box.x < bounds.x || box.y < bounds.y || box.x + box.w > bounds.x + bounds.w || box.y + box.h > bounds.y + bounds.h) continue;
-            bool overlap = false;
-            for (int k = 0; k < labels; k++) if (box.x < used[k].x + used[k].w + 6 && box.x + box.w + 6 > used[k].x && box.y < used[k].y + used[k].h + 4 && box.y + box.h + 4 > used[k].y) { overlap = true; break; }
-            if (!overlap) {
-                used[labels++] = box;
-                cui_draw_text(ui, CUI_FONT_BODY, 12, pos, dark ? cui__rgba(233, 235, 232, 255) : cui__rgba(41, 55, 59, 255), f->name, -1);
+    /* One label per viewport cell first, then a second pass for density.
+     * A global cap alone exhausts on the first (top-left) tiles in a large
+     * window, leaving the rest of the map nameless. Keep collision global. */
+    unsigned char cell_counts[MAP_LABEL_COLS * MAP_LABEL_ROWS] = {0};
+    if (bounds.w > 0 && bounds.h > 0) for (int pass = 0; pass < 2 && labels < MAP_LABELS; pass++) {
+        for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
+            const cui_mvt_tile *t = m->refs[i].tile;
+            if (!t) continue;
+            float ox = bounds.x + m->refs[i].x, oy = bounds.y + m->refs[i].y;
+            for (int j = 0; j < t->nfeatures && labels < MAP_LABELS; j++) {
+                const map_feature *f = &t->features[j];
+                if (f->kind != 3 || !f->name[0] || !f->count) continue;
+                map_point p = t->points[t->paths[f->first].first];
+                cui_vec2 pos = {ox + (float)p.x * m->refs[i].size / f->extent,
+                                oy + (float)p.y * m->refs[i].size / f->extent};
+                if (pos.x < bounds.x || pos.y < bounds.y ||
+                    pos.x >= bounds.x + bounds.w || pos.y >= bounds.y + bounds.h) continue;
+                int col = (int)((pos.x - bounds.x) * MAP_LABEL_COLS / bounds.w);
+                int row = (int)((pos.y - bounds.y) * MAP_LABEL_ROWS / bounds.h);
+                if (col >= MAP_LABEL_COLS) col = MAP_LABEL_COLS - 1;
+                if (row >= MAP_LABEL_ROWS) row = MAP_LABEL_ROWS - 1;
+                int cell = row * MAP_LABEL_COLS + col;
+                if (cell_counts[cell] > pass) continue;
+                cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
+                cui_rect box = {pos.x, pos.y, text.width, text.height};
+                if (box.x + box.w > bounds.x + bounds.w || box.y + box.h > bounds.y + bounds.h) continue;
+                bool overlap = false;
+                for (int k = 0; k < labels; k++) if (box.x < used[k].x + used[k].w + 6 && box.x + box.w + 6 > used[k].x && box.y < used[k].y + used[k].h + 4 && box.y + box.h + 4 > used[k].y) { overlap = true; break; }
+                if (!overlap) {
+                    cell_counts[cell]++;
+                    used[labels++] = box;
+                    cui_draw_text(ui, CUI_FONT_BODY, 12, pos,
+                                  dark ? cui__rgba(233, 235, 232, 255) : cui__rgba(41, 55, 59, 255), f->name, -1);
+                }
             }
         }
     }

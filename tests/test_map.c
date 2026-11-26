@@ -45,6 +45,7 @@ static cui_mvt_tile *long_water_tile(void) {
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
 typedef struct { cui_mvt_tile *tile; cui_map_view view; int requests; cui_map_result last; } scene;
+static void frame(cui_ctx *ui, scene *s);
 static cui_mvt_tile *large_place_table_tile(void) {
     long_pb feature = {{0}, 0}, layer = {{0}, 0}, tile = {{0}, 0};
     long_pb value = {{0}, 0}, tags = {{0}, 0}, geom = {{0}, 0};
@@ -290,6 +291,53 @@ static void check_zoom_out_fallback(const map_fixture_buf *raw) {
     }
     cui_destroy(ui); cui_sw_destroy(sw); cui_mvt_tile_destroy(s.tile);
 }
+/* One named place per tile: a large viewport has more than 64 candidates.
+ * The last rows must not disappear simply because top-left tiles were first. */
+static const cui_mvt_tile *label_lookup(void *user, int z, int x, int y) {
+    (void)x; (void)y;
+    return z == 8 ? (const cui_mvt_tile *)user : NULL;
+}
+static void check_labels_cover_large_view(void) {
+    map_fixture_buf geom = {{0}, 0}, tags = {{0}, 0}, feature = {{0}, 0};
+    map_fixture_buf value = {{0}, 0}, layer = {{0}, 0}, raw = {{0}, 0};
+    map_fixture_var(&geom, 9); map_fixture_coord(&geom, 2048); map_fixture_coord(&geom, 2048);
+    map_fixture_var(&tags, 0); map_fixture_var(&tags, 0);
+    map_fixture_nested(&feature, 2, tags.b, tags.n);
+    map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
+    map_fixture_nested(&value, 1, "Town", 4);
+    map_fixture_nested(&layer, 1, "place", 5);
+    map_fixture_nested(&layer, 2, feature.b, feature.n);
+    map_fixture_nested(&layer, 3, "name", 4);
+    map_fixture_nested(&layer, 4, value.b, value.n);
+    map_fixture_field(&layer, 5, 4096); map_fixture_field(&layer, 15, 2);
+    map_fixture_nested(&raw, 3, layer.b, layer.n);
+    cui_mvt_tile *tile = cui_mvt_tile_decode(raw.b, raw.n);
+    cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_DARK;
+    cui_ctx *ui = cui_create(&desc);
+    CHECK(tile && ui);
+    if (tile && ui) {
+        cui_map_view view = {0, 0, 8};
+        cui_map_opts opts = {0}; opts.lookup = label_lookup; opts.tile_user = tile;
+        cui_set_viewport(ui, 3072, 2048, 1);
+        for (int i = 0; i < 2; i++) {
+            cui_begin_frame(ui, 1.f / 60);
+            cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+                cui_map_ex(ui, "labels", &view, &opts);
+            cui_end_frame(ui);
+        }
+        const cui_draw_data *draw = cui_get_draw_data(ui);
+        int top = 0, bottom_right = 0;
+        for (int i = 0; i < draw->vertex_count; i++) {
+            const cui_vertex *v = &draw->vertices[i];
+            if (v->mode != CUI_SHADE_TEXT) continue;
+            if (v->y < 512) top++;
+            if (v->y > 1536 && v->x > 2048) bottom_right++;
+        }
+        CHECK(top > 0 && bottom_right > 0);
+        cui_destroy(ui);
+    } else cui_destroy(ui);
+    cui_mvt_tile_destroy(tile);
+}
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
 }
@@ -427,6 +475,7 @@ int main(int argc, char **argv) {
     check_raster_fallback(&base_fixture, 2);
     check_zoom_fallback(&base_fixture);
     check_zoom_out_fallback(&base_fixture);
+    check_labels_cover_large_view();
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

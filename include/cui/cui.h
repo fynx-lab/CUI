@@ -686,6 +686,7 @@ typedef struct cui_input_opts {
     bool disabled;
     bool clearable;            /* x button when not empty */
     bool autofocus;
+    bool select_all;           /* select the whole value on this frame; pass it once when the field opens */
     bool read_only;
     cui_control_size size;
     cui_size width;
@@ -835,6 +836,12 @@ CUI_API void cui_menu_end(cui_ctx *ui);
 /* Context menu: opens on right click over the previous component. */
 CUI_API bool cui_context_menu_begin(cui_ctx *ui, const char *id);
 CUI_API void cui_context_menu_end(cui_ctx *ui);
+/* True when the pointer is on the dimmed backdrop of the modal from last frame,
+ * not on the dialog panel itself. */
+CUI_API bool cui_pointer_on_modal_scrim(cui_ctx *ui);
+/* Open this context menu at the pointer now. The matching cui_context_menu_begin
+ * in the same frame then builds its items. */
+CUI_API void cui_context_menu_open(cui_ctx *ui, const char *id);
 
 typedef struct cui_menu_item_opts {
     int _;
@@ -861,6 +868,7 @@ CUI_API void cui_tooltip(cui_ctx *ui, const char *text);
 typedef struct cui_dialog_opts {
     int _;
     const char *description;
+    const char *id;            /* stable identity when title changes (for i18n) */
     float width;               /* default 440 */
     bool no_close_button;      /* hides the x in the corner (Esc and a click outside still close it unless `persistent`) */
     bool persistent;           /* clicking outside or Esc does not close */

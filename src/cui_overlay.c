@@ -92,7 +92,10 @@ bool cui__popup_begin(cui_ctx *ui, cui_id id, cui_id anchor, int placement, floa
         if (top && cui_key_pressed(ui, CUI_KEY_ESCAPE)) { p->open = false; ui->kpressed[CUI_KEY_ESCAPE] = 0; }
         if (ui->mpressed[0] || ui->mpressed[1]) {
             bool inside = ui->hot_layer == id || cui__layer_is_open_popup_after(ui, ui->hot_layer, p);
-            bool on_anchor = anchor && ui->hot == anchor;
+            /* A context menu is anchored to the whole grid. A click there is
+             * outside the menu and should dismiss it. Dropdowns still stay
+             * open while the pointer is on their button. */
+            bool on_anchor = !p->at_mouse && anchor && ui->hot == anchor;
             if (!inside && !on_anchor && ui->frame > p->opened_frame) p->open = false;
         }
     }
@@ -117,7 +120,9 @@ bool cui__popup_begin(cui_ctx *ui, cui_id id, cui_id anchor, int placement, floa
     n->gap = gap;
     n->flags |= CUI_NF_HIT_OPAQUE;
     if (width > 0) n->w = CUI_PX(width);
-    else if (anchor && cui__has_prev_rect(ui, anchor)) n->min_w = cui__prev_rect(ui, anchor).w;
+    /* A context menu opens over whatever was clicked. Do not stretch it to
+     * that widget: a full-size canvas would make the menu window-wide. */
+    else if (!p->at_mouse && anchor && cui__has_prev_rect(ui, anchor)) n->min_w = cui__prev_rect(ui, anchor).w;
     n->min_w = CUI_MAX(n->min_w, menu ? 180.0f : 0.0f);
     n->max_h = 420;
     n->opacity = t;
@@ -219,15 +224,30 @@ bool cui_menu_begin(cui_ctx *ui, const char *label, const cui_menu_opts *o) {
 
 void cui_menu_end(cui_ctx *ui) { cui__popup_end(ui); }
 
+static cui_id cui__context_menu_id(cui_ctx *ui, const char *id) {
+    return cui_make_id(ui, id) ^ 0xC7Cu;
+}
+
+static void cui__context_menu_at_pointer(cui_ctx *ui, cui_id pid) {
+    cui__close_all_popups(ui);
+    cui__popup_set(ui, pid, true);
+    cui_popup *p = cui__popup_get(ui, pid, false);
+    if (p) { p->at_mouse = true; p->mouse.x = ui->mx; p->mouse.y = ui->my; }
+}
+
+bool cui_pointer_on_modal_scrim(cui_ctx *ui) {
+    return ui->prev_modal.id && ui->hot == (ui->prev_modal.id ^ 0x5C819u);
+}
+
+void cui_context_menu_open(cui_ctx *ui, const char *id) {
+    cui__context_menu_at_pointer(ui, cui__context_menu_id(ui, id));
+}
+
 bool cui_context_menu_begin(cui_ctx *ui, const char *id) {
-    cui_id pid = cui_make_id(ui, id) ^ 0xC7Cu;
+    cui_id pid = cui__context_menu_id(ui, id);
     cui_id anchor = ui->last_id;
-    if (anchor && ui->hot == anchor && ui->mpressed[CUI_MOUSE_RIGHT]) {
-        cui__close_all_popups(ui);
-        cui__popup_set(ui, pid, true);
-        cui_popup *p = cui__popup_get(ui, pid, false);
-        if (p) { p->at_mouse = true; p->mouse.x = ui->mx; p->mouse.y = ui->my; }
-    }
+    if (anchor && ui->hot == anchor && ui->mpressed[CUI_MOUSE_RIGHT])
+        cui__context_menu_at_pointer(ui, pid);
     if (!cui__popup_get(ui, pid, false)) return false;
     return cui__popup_begin(ui, pid, anchor, CUI_PLACE_BOTTOM_START, 0, 6, 0, true);
 }
@@ -821,7 +841,7 @@ bool cui_dialog_begin(cui_ctx *ui, const char *title, bool *open, const cui_dial
     cui_dialog_opts d;
     memset(&d, 0, sizeof d);
     if (!o) o = &d;
-    cui_id id = cui_make_id(ui, title) ^ 0xD1A106u;
+    cui_id id = cui_make_id(ui, o->id ? o->id : title) ^ 0xD1A106u;
     return cui__modal_begin(ui, id, title, open, o->description, o->width > 0 ? o->width : 440, o->persistent, !o->no_close_button, 0, CUI_SIDE_RIGHT,
                              (o->draggable ? CUI__GRIP_DRAG : 0) | (o->resizable ? CUI__GRIP_RESIZE : 0));
 }

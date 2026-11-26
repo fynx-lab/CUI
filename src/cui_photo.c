@@ -94,8 +94,6 @@ bool cui_image_viewer_ex(cui_ctx *ui, const char *id_str, cui_texture tex, int i
         if (cui_key_pressed(ui, CUI_KEY_MINUS)) CUI__IV_ZOOM(z / 1.5f, mcx, mcy);
         if (cui_key_pressed(ui, CUI_KEY_0)) fitted = true;
         if (cui_key_pressed(ui, CUI_KEY_1)) CUI__IV_ZOOM(1.0f, mcx, mcy);
-        if (cui_key_pressed(ui, CUI_KEY_LEFT)) { cx -= step; fitted = false; }
-        if (cui_key_pressed(ui, CUI_KEY_RIGHT)) { cx += step; fitted = false; }
         if (cui_key_pressed(ui, CUI_KEY_UP)) { cy -= step; fitted = false; }
         if (cui_key_pressed(ui, CUI_KEY_DOWN)) { cy += step; fitted = false; }
     }
@@ -131,7 +129,7 @@ bool cui_image_viewer_ex(cui_ctx *ui, const char *id_str, cui_texture tex, int i
         /* zoom out, the percentage, zoom in and fit, in a pill in the corner */
         cui__open(ui, n);
         cui_push_id(ui, id_str ? id_str : "viewer");
-        float bw = 172, bh = 32;
+        float bw = 228, bh = 32;
         int bar = cui__absolute(ui, id ^ 0x1A6E2u, vw - bw - 10, vh - bh - 10, bw, bh);
         cui_node *bn = &ui->nodes[bar];
         bn->dir = CUI_ROW; bn->align = CUI_ALIGN_CENTER; bn->pad[1] = bn->pad[3] = 3; bn->gap = 0;
@@ -144,6 +142,8 @@ bool cui_image_viewer_ex(cui_ctx *ui, const char *id_str, cui_texture tex, int i
         cui_button_opts bo;
         memset(&bo, 0, sizeof bo);
         bo.size = CUI_SIZE_SM; bo.variant = CUI_BUTTON_GHOST;
+        bo.tooltip = "Actual size";
+        if (cui_button_ex(ui, "1:1", &bo)) { fitted = false; CUI__IV_ZOOM(1.0f, mcx, mcy); cui__iv_clamp(&cx, &cy, z, vw, vh, iw, ih); *view = (cui_image_view){ z, cx, cy }; }
         bo.tooltip = "Zoom out";
         if (cui_icon_button_ex(ui, CUI_ICON_MINUS, &bo)) { fitted = false; CUI__IV_ZOOM(z / 1.5f, mcx, mcy); cui__iv_clamp(&cx, &cy, z, vw, vh, iw, ih); *view = (cui_image_view){ z, cx, cy }; }
         int pt = cui__text_node(ui, cui__frame_printf(ui, "%.0f%%", (double)(z * 100)), -1, CUI_FONT_MEDIUM, cui__fs(ui, ui->theme.text_sm), CUI_C(ui, FOREGROUND), false);

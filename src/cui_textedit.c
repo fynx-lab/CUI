@@ -620,6 +620,10 @@ int cui__text_field(cui_ctx *ui, cui_id id, char *buf, size_t cap, const cui_inp
         cui__state_set_dtor(ui, id, cui__edit_dtor);
         if (o->autofocus) ui->focus = id;
     }
+    if (o->select_all) {
+        ui->focus = id;
+        ui->tf_select_all = id;
+    }
     cui_id area_id = id ^ 0xED17u;
     if (ui->tf_select_all == id && ui->focus == id) {
         e->anchor = 0;

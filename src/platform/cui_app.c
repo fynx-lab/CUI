@@ -140,6 +140,7 @@ cui_app *cui_app_create(const cui_app_desc *desc) {
     else pi = ui->platform;
     cui_set_platform(ui, &pi);
     app->running = true;
+    app->profile_enabled = cui__env_is("CUI_APP_PROFILE", "1");
     app->last_time = cui__plat_now();
     app->screenshot_path = getenv("CUI_SCREENSHOT");
     if (app->screenshot_path) {
@@ -224,6 +225,10 @@ void cui__app_set_clipboard_cache(cui_app *app, const char *utf8) {
 }
 
 void cui__app_render(cui_app *app) {
+    /* Opt-in timings exclude event waits and frame pacing. Keep the normal
+     * rendering path free of clock calls when profiling is disabled. */
+    bool profile = app->profile_enabled && app->software;
+    double start = profile ? cui__plat_now() : 0;
     if (app->in_frame) {
         cui_end_frame(app->ui);
         app->in_frame = false;
@@ -231,6 +236,9 @@ void cui__app_render(cui_app *app) {
     const cui_draw_data *dd = cui_get_draw_data(app->ui);
     int w = dd->width_px, h = dd->height_px;
     if (w <= 0 || h <= 0) return;
+    double painted = profile ? cui__plat_now() : 0;
+    double rasterized = painted;
+    uint64_t damage_pixels = 0;
 #if CUI__APP_GPU
     if (app->gpu) {
 #if defined(__linux__)
@@ -250,14 +258,40 @@ void cui__app_render(cui_app *app) {
         }
         if (!app->sw_pixels) return;
         cui_sw_render(app->sw, dd, app->sw_pixels, w, h, w * 4, CUI_SW_BGRA);
+        if (profile) rasterized = cui__plat_now();
         int dx, dy, dw, dh;
         bool changed = cui_sw_last_damage(app->sw, &dx, &dy, &dw, &dh);
+        if (profile && changed) damage_pixels = (uint64_t)dw * (uint64_t)dh;
         if (app->force_present || !app->presented_once || (changed && !cui__plat_present_part(app, app->sw_pixels, w, h, w * 4, dx, dy, dw, dh)))
             cui__plat_present(app, app->sw_pixels, w, h, w * 4);
         app->force_present = false;
     }
     app->presented_once = true;
     app->last_present = cui__plat_now();
+    if (profile) {
+        double ms[3] = {(painted - start) * 1000.0,
+                        (rasterized - painted) * 1000.0,
+                        (app->last_present - rasterized) * 1000.0};
+        for (int i = 0; i < 3; i++) {
+            app->profile_sum[i] += ms[i];
+            if (ms[i] > app->profile_max[i]) app->profile_max[i] = ms[i];
+        }
+        app->profile_damage_pixels += damage_pixels;
+        app->profile_total_pixels += (uint64_t)w * (uint64_t)h;
+        if (++app->profile_frames == 60) {
+            fprintf(stderr, "cui profile: frames=60 framebuffer=%dx%d paint=%.2f/%.2fms raster=%.2f/%.2fms present=%.2f/%.2fms damage=%.1f%% (avg/max; no event wait)\n",
+                    w, h,
+                    app->profile_sum[0] / 60, app->profile_max[0],
+                    app->profile_sum[1] / 60, app->profile_max[1],
+                    app->profile_sum[2] / 60, app->profile_max[2],
+                    app->profile_total_pixels ?
+                    (double)app->profile_damage_pixels * 100.0 / app->profile_total_pixels : 0);
+            app->profile_frames = 0;
+            app->profile_damage_pixels = app->profile_total_pixels = 0;
+            memset(app->profile_sum, 0, sizeof app->profile_sum);
+            memset(app->profile_max, 0, sizeof app->profile_max);
+        }
+    }
 }
 
 static void cui__app_begin(cui_app *app) {

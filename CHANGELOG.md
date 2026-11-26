@@ -57,7 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
-- Add opt-in `CUI_APP_PROFILE=1` software-rendering timing logs for the shared app loop and Windows map demo. The 60-frame aggregates separate map paint, software rasterization, presentation, tile baking, and UI construction without changing the default renderer or claiming input-to-display FPS.
+- Opt-in `CUI_APP_PROFILE=1` timing logs now write directly to an append-only file (`map-profile.log` or `CUI_APP_PROFILE_FILE`) rather than relying on stderr from the console-less Windows demo. Flush 60-frame aggregates and the partial sample on exit. Timings separate map paint, software rasterization, presentation, tile baking and UI construction without claiming input-to-display FPS.
 - Place labels in a maximized map now spread across the viewport instead of exhausting the global 64-label budget in the first top-left tiles. A two-pass 12×8 spatial budget retains global collision checks and caps labels at 192.
 - The online map evicts already-presented tiles (old zoom levels first) before admitting new downloads near its 96 MiB decoded-cache limit, and automatically retries temporary admission failures instead of leaving permanent `cache full` gaps.
 - Map zoom now animates over about 200 ms and can be retargeted during consecutive wheel/key input. Already-cached source-level tiles fill missing target areas by geographic alignment; newly loaded tiles replace their own areas instead of blanking the entire viewport when suitable old tiles remain cached. No old-level network requests or change to the 48 MiB raster/96 MiB decoded caps. Reduced motion skips the travel but keeps the fallback.

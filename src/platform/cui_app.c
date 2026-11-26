@@ -5,6 +5,7 @@
 static cui_app *cui__current_app;
 static void cui__app_set_clip(void *user, const char *utf8);
 static const char *cui__app_get_clip(void *user);
+static void cui__app_profile_report(cui_app *app);
 
 static bool cui__env_is(const char *name, const char *value) {
     const char *v = getenv(name);
@@ -140,7 +141,15 @@ cui_app *cui_app_create(const cui_app_desc *desc) {
     else pi = ui->platform;
     cui_set_platform(ui, &pi);
     app->running = true;
-    app->profile_enabled = cui__env_is("CUI_APP_PROFILE", "1");
+    app->profile_enabled = cui__env_is("CUI_APP_PROFILE", "1") && app->software;
+    if (app->profile_enabled) {
+        const char *path = getenv("CUI_APP_PROFILE_FILE");
+        if (!path || !*path) path = "map-profile.log";
+        app->profile_log = fopen(path, "a");
+        if (!app->profile_log) app->profile_log = stderr;
+        fprintf(app->profile_log, "cui profile: started (software renderer; output=%s)\n", path);
+        fflush(app->profile_log);
+    }
     app->last_time = cui__plat_now();
     app->screenshot_path = getenv("CUI_SCREENSHOT");
     if (app->screenshot_path) {
@@ -157,6 +166,8 @@ void cui_app_destroy(cui_app *app) {
     if (!app) return;
     if (cui__current_app == app) cui__current_app = NULL;
     if (app->in_frame) { cui_end_frame(app->ui); app->in_frame = false; }
+    cui__app_profile_report(app); /* flush a partial 60-frame sample on exit */
+    if (app->profile_log && app->profile_log != stderr) fclose(app->profile_log);
     /* release textures while the GL context still exists */
     cui_set_renderer(app->ui, NULL);
     if (app->gl) cui_gl_destroy(app->gl);
@@ -224,6 +235,24 @@ void cui__app_set_clipboard_cache(cui_app *app, const char *utf8) {
     if (app->clipboard) memcpy(app->clipboard, utf8, n + 1);
 }
 
+static void cui__app_profile_report(cui_app *app) {
+    unsigned frames = app->profile_frames;
+    if (!frames || !app->profile_log) return;
+    FILE *out = app->profile_log;
+    fprintf(out, "cui profile: frames=%u framebuffer=%dx%d paint=%.2f/%.2fms raster=%.2f/%.2fms present=%.2f/%.2fms damage=%.1f%% (avg/max; no event wait)\n",
+            frames, app->profile_width, app->profile_height,
+            app->profile_sum[0] / frames, app->profile_max[0],
+            app->profile_sum[1] / frames, app->profile_max[1],
+            app->profile_sum[2] / frames, app->profile_max[2],
+            app->profile_total_pixels ?
+            (double)app->profile_damage_pixels * 100.0 / app->profile_total_pixels : 0);
+    fflush(out);
+    app->profile_frames = 0;
+    app->profile_damage_pixels = app->profile_total_pixels = 0;
+    memset(app->profile_sum, 0, sizeof app->profile_sum);
+    memset(app->profile_max, 0, sizeof app->profile_max);
+}
+
 void cui__app_render(cui_app *app) {
     /* Opt-in timings exclude event waits and frame pacing. Keep the normal
      * rendering path free of clock calls when profiling is disabled. */
@@ -278,19 +307,8 @@ void cui__app_render(cui_app *app) {
         }
         app->profile_damage_pixels += damage_pixels;
         app->profile_total_pixels += (uint64_t)w * (uint64_t)h;
-        if (++app->profile_frames == 60) {
-            fprintf(stderr, "cui profile: frames=60 framebuffer=%dx%d paint=%.2f/%.2fms raster=%.2f/%.2fms present=%.2f/%.2fms damage=%.1f%% (avg/max; no event wait)\n",
-                    w, h,
-                    app->profile_sum[0] / 60, app->profile_max[0],
-                    app->profile_sum[1] / 60, app->profile_max[1],
-                    app->profile_sum[2] / 60, app->profile_max[2],
-                    app->profile_total_pixels ?
-                    (double)app->profile_damage_pixels * 100.0 / app->profile_total_pixels : 0);
-            app->profile_frames = 0;
-            app->profile_damage_pixels = app->profile_total_pixels = 0;
-            memset(app->profile_sum, 0, sizeof app->profile_sum);
-            memset(app->profile_max, 0, sizeof app->profile_max);
-        }
+        app->profile_width = w; app->profile_height = h;
+        if (++app->profile_frames == 60) cui__app_profile_report(app);
     }
 }
 

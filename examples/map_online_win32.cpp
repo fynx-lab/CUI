@@ -369,6 +369,18 @@ static void stop(demo *d) {
         d->rhead = (d->rhead + 1) % RESULT_QUEUE; d->rcount--;
     }
 }
+static void map_profile_report(FILE *out, const demo *d, unsigned frames,
+                               const double *sum, const double *peak,
+                               unsigned long long hits, unsigned long long misses,
+                               unsigned long long raster_hits) {
+    if (!out || !frames) return;
+    fprintf(out, "map profile: frames=%u z%d pump=%.2f/%.2fms tile_bake=%.2f/%.2fms ui_build=%.2f/%.2fms tile_lookups=%llu/%llu raster_hits=%llu raster=%.1fMiB (avg/max; hits/misses; before paint)\n",
+            frames, (int)d->view.zoom,
+            sum[0] / frames, peak[0], sum[1] / frames, peak[1],
+            sum[2] / frames, peak[2], hits, misses, raster_hits,
+            (double)d->raster_bytes / (1024 * 1024));
+    fflush(out);
+}
 int main(void) {
     demo *d = static_cast<demo *>(calloc(1, sizeof *d));
     if (!d) return 1;
@@ -424,6 +436,17 @@ int main(void) {
     unsigned long long drag_vertices = 0;
     int drag_samples = 0;
     bool profile = getenv("CUI_APP_PROFILE") && !strcmp(getenv("CUI_APP_PROFILE"), "1") && cui_app_is_software(app);
+    FILE *profile_log = NULL;
+    if (profile) {
+        const char *path = getenv("CUI_APP_PROFILE_FILE");
+        if (!path || !*path) path = "map-profile.log";
+        profile_log = fopen(path, "a");
+        profile = profile_log != NULL;
+        if (profile) {
+            fprintf(profile_log, "map profile: started (output=%s)\n", path);
+            fflush(profile_log);
+        }
+    }
     double profile_sum[3] = {}, profile_max[3] = {};
     unsigned profile_frames = 0;
     unsigned long long profile_hits = 0, profile_misses = 0, profile_raster_hits = 0;
@@ -550,14 +573,9 @@ int main(void) {
                 if (ms[i] > profile_max[i]) profile_max[i] = ms[i];
             }
             if (++profile_frames == 60) {
-                fprintf(stderr, "map profile: frames=60 z%d pump=%.2f/%.2fms tile_bake=%.2f/%.2fms ui_build=%.2f/%.2fms tile_lookups=%llu/%llu raster_hits=%llu raster=%.1fMiB (avg/max; hits/misses; before paint)\n",
-                        (int)d->view.zoom,
-                        profile_sum[0] / 60, profile_max[0],
-                        profile_sum[1] / 60, profile_max[1],
-                        profile_sum[2] / 60, profile_max[2],
-                        d->hits - profile_hits, d->misses - profile_misses,
-                        d->raster_hits - profile_raster_hits,
-                        (double)d->raster_bytes / (1024 * 1024));
+                map_profile_report(profile_log, d, profile_frames, profile_sum, profile_max,
+                                   d->hits - profile_hits, d->misses - profile_misses,
+                                   d->raster_hits - profile_raster_hits);
                 profile_frames = 0;
                 memset(profile_sum, 0, sizeof profile_sum);
                 memset(profile_max, 0, sizeof profile_max);
@@ -565,6 +583,10 @@ int main(void) {
             }
         }
     }
+    map_profile_report(profile_log, d, profile_frames, profile_sum, profile_max,
+                       d->hits - profile_hits, d->misses - profile_misses,
+                       d->raster_hits - profile_raster_hits);
+    if (profile_log) fclose(profile_log);
     stop(d); cui_app_destroy(app); free(d);
     return 0;
 }

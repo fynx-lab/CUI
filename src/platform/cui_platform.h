@@ -36,9 +36,11 @@ struct cui_app {
     int screenshot_frames;
     int frames;
     bool profile_enabled;     /* CUI_APP_PROFILE=1: opt-in software frame timings */
+    FILE *profile_log;        /* owned unless it is stderr */
     unsigned profile_frames;
     double profile_sum[3], profile_max[3]; /* paint, software raster, present */
     uint64_t profile_damage_pixels, profile_total_pixels;
+    int profile_width, profile_height;
     cui_window_placement placement;   /* the copy desc.placement points to, when one was given */
 };
 

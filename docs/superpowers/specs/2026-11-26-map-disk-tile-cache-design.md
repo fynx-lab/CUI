@@ -1,0 +1,25 @@
+# Windows map demo: persistent tile cache
+
+## Scope and goal
+
+The Windows OpenFreeMap demo gains a persistent, per-user cache of **downloaded, uncompressed MVT bytes**. For a visible tile the lookup order is decoded memory → disk file → network. The existing 192 MiB decoded and 96 MiB rendered-image RAM limits, at-most-four network workers, visible-tile-only request policy, retry behavior, attribution, and 2 MiB uncompressed tile-input limit stay intact. The C99 CUI core remains provider-neutral and does no file or network I/O. No background prefetch, offline bulk downloader, or automatic disk eviction is included.
+
+## Layout and identity
+
+Use `%LOCALAPPDATA%\CUI\MapTiles\v1\<source-id>\<z>\<x>\<y>.pbf`. `<source-id>` is the hex SHA-256 digest of the canonical fixed OpenFreeMap origin plus the **strictly validated, versioned TileJSON path template**. Only validated z/x/y integers in that template produce filenames. The host uses a Windows known-folder API for the local per-user directory; neither network text nor a tile filename is interpolated directly into a filesystem path. A new template version gets a new directory; old files remain for their original version. No render images, labels, HTTP errors, or TileJSON response bodies are stored as tile files.
+
+Keep one last-known-good TileJSON file under the `v1` directory, bounded at 65,536 bytes and written only after it passes the existing strict TileJSON validator. It is revalidated on every read. The online TileJSON request remains authoritative: on connection/transport failure, use the saved validated TileJSON to enable browsing already cached areas. An invalid HTTP 200 TileJSON does **not** silently fall back to saved data. Offline fallback is indicated in the demo UI, with a Retry online action; a successful retry can switch to a newer template. If the template changes, clear the previous namespace's decoded slots and rendered images, cancel obsolete queued work and invalidate tokens for in-flight results before requesting tiles in the new namespace. Failed Retry leaves the existing offline map usable. The attribution remains visible offline.
+
+## Tile data flow
+
+Map callbacks remain synchronous, bounded in-memory lookups and job enqueue only. Each worker handles the disk step for an already-requested visible tile before making any tile HTTP request. Read at most 2 MiB plus one byte, decode with `cui_mvt_tile_decode`, and treat an unreadable, oversized or invalid file as a miss; remove invalid files when possible and then use the existing bounded network path. Only an HTTP 200 tile whose bytes fit the limit **and decode successfully** can be saved. A disk hit returns a decoded tile through the existing eight-result bounded queue; the UI thread retains its present cache-admission and cancellation checks. Stale results are disposed normally. Failure to create/read/write/touch the disk cache degrades to the existing network behavior without blocking map interaction.
+
+Disk reads, writes, TileJSON-file handling, and deletion of corrupt files run off the UI thread. Use a dedicated host-only C++11/Win32 disk-cache module separate from the decoder and WinHTTP adapter. Disk writes use a unique temporary file in the destination directory, complete the write, then atomically rename into place; incomplete temporary files must not be read as tiles and can be removed opportunistically. Concurrent workers and separate demo processes may race on the same key: existing valid data wins or is replaced atomically by another successfully decoded tile, and read/rename failures are harmless misses. Disk data is never trusted merely because it exists: every hit is length-bounded and decoded again. Directory creation and indexing cannot prevent the UI from drawing placeholders or already cached imagery.
+
+## File age and growth
+
+Do **not** use Windows' automatic last-access timestamp. Explicitly update the tile file's last-write time on a successful disk hit (a fresh network write already has a new time); this prepares for a possible future LRU policy. This version neither scans all files to build an eviction index nor deletes files because of age or total size. Disk use can grow without a bound, including obsolete source-version directories; document that users can clear the directory after closing the demo and that disk-full/write errors are nonfatal. Never delete other files outside this dedicated cache root.
+
+## Verification and limits
+
+Add offline tests of source-template namespacing, read/write and restart lookup, hit-before-network worker routing, corrupted/oversized-file fallback, last-good TileJSON validation and transport-only fallback, source change invalidation, stale completion, concurrent writes, and disk-failure degradation where practical. The feature is not considered runtime-verified until those tests and the visual flow are explicitly authorized and run. Per the user's standing instruction, implementation work may compile targets but must **not run tests or launch a window by default**; disclose the untested status. Keep all commits local and do not push without permission.

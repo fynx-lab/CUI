@@ -5153,7 +5153,8 @@ typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_
 typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;
 typedef const cui_mvt_tile *(*cui_map_tile_lookup)(void *user, int z, int x, int y);
 /* Optional texture for the base geometry of a decoded 256x256 tile. The
- * caller keeps it alive through cui_end_frame. Return 0 for vector fallback. */
+ * caller keeps it alive through cui_end_frame. Return 0 for vector fallback
+ * unless defer_vector_base is enabled. */
 typedef cui_texture (*cui_map_tile_raster_lookup)(void *user, int z, int x, int y);
 typedef void (*cui_map_tile_request)(void *user, int z, int x, int y);
 typedef struct cui_map_opts {
@@ -5166,6 +5167,9 @@ typedef struct cui_map_opts {
     int marker_count;
     int min_zoom, max_zoom;             /* zero defaults: 0..14 */
     cui_map_tile_raster_lookup raster_lookup; /* optional cached base image */
+    bool defer_vector_base;           /* if raster_lookup misses, use cached source imagery or placeholder
+                                       * while the host prepares the image; labels and markers stay live.
+                                       * Default false retains immediate vector drawing. */
 } cui_map_opts;
 typedef struct cui_map_result {
     bool view_changed;

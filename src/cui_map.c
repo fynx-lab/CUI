@@ -291,7 +291,7 @@ static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
 typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; int z, tx, ty; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
-    int z, count, fallback_count; float scale; bool dragging;
+    int z, count, fallback_count; float scale; bool dragging, defer_vector_base;
     map_ref refs[MAP_REFS], fallback[MAP_REFS];
 } map_paint;
 static double map_clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -377,7 +377,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     for (int i = 0; i < m->count; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
         cui_rect r = {bounds.x + m->refs[i].x, bounds.y + m->refs[i].y, m->refs[i].size, m->refs[i].size};
-        if (!t && !m->refs[i].image) {
+        if (!m->refs[i].image && (!t || m->defer_vector_base)) {
             bool filled = false;
             cui_push_clip(ui, bounds);
             cui_push_clip(ui, r);
@@ -388,7 +388,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                     sr.y >= r.y + r.h || sr.y + sr.h <= r.y) continue;
                 if (src->image) cui_draw_image(ui, src->image, sr, (cui_rect){0, 0, 1, 1},
                                                CUI_CORNERS(0), cui__rgba(255, 255, 255, 255));
-                else if (src->tile) map_draw_base(ui, src->tile, sr, src->z, false);
+                else if (src->tile && !m->defer_vector_base) map_draw_base(ui, src->tile, sr, src->z, false);
                 filled = true;
             }
             if (!filled) cui_draw_rect(ui, r, CUI_CORNERS(0),
@@ -498,8 +498,11 @@ static void map_collect_fallback(map_paint *m, const cui_map_opts *opts, int z, 
         if (y < 0 || y >= tiles) continue;
         for (int x = minx; x <= maxx && m->fallback_count - first < MAP_REFS / 4; x++) {
             int tx = (x % tiles + tiles) % tiles;
-            const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
+            /* The raster-first mode never regenerates old-level vectors just
+             * to cover an unbaked target tile. Other hosts keep the legacy
+             * decoded-vector fallback. */
             cui_texture image = opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
+            const cui_mvt_tile *tile = m->defer_vector_base ? NULL : opts->lookup(opts->tile_user, z, tx, y);
             if (!tile && !image) continue;
             m->fallback[m->fallback_count++] = (map_ref){tile, image,
                 (float)(x * size - cx + rect.w / 2), (float)(y * size - cy + rect.h / 2), (float)size, z, tx, y};
@@ -603,6 +606,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     }
     m->view = *view; m->z = z; m->scale = (float)scale;
     m->dragging = r.pressed && st->moved;
+    m->defer_vector_base = opts && opts->defer_vector_base && opts->raster_lookup;
     if (opts) { m->markers = opts->markers; m->nmarkers = opts->markers && opts->marker_count > 0 ? opts->marker_count : 0;
                 if (m->nmarkers > 4096) m->nmarkers = 4096; }
     for (int i = 0; i < m->nmarkers && (r.hovered || r.clicked); i++) {
@@ -657,11 +661,9 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
                 int tx = (x % tiles + tiles) % tiles;
                 const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
                 cui_texture image = opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
-                if (!tile) {
-                    if (!image) missing++;
-                    if (opts->request && x >= req_minx && x <= req_maxx &&
-                        y >= req_miny && y <= req_maxy) opts->request(opts->tile_user, z, tx, y);
-                }
+                if (!image && (!tile || m->defer_vector_base)) missing++;
+                if (!tile && opts->request && x >= req_minx && x <= req_maxx &&
+                    y >= req_miny && y <= req_maxy) opts->request(opts->tile_user, z, tx, y);
                 m->refs[m->count++] = (map_ref){tile, image,
                     (float)(x * size - cx + r.rect.w / 2), (float)(y * size - cy + r.rect.h / 2), (float)size, z, tx, y};
             }

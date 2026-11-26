@@ -210,7 +210,7 @@ static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
 typedef struct {
     cui_mvt_tile *tile; cui_texture parent, child;
     cui_map_view view; cui_map_result result;
-    int source_requests, target_requests; bool child_ready, parent_ready, all_children;
+    int source_requests, target_requests; bool child_ready, child_raster_ready, parent_ready, all_children, defer_base;
 } zoom_scene;
 static const cui_mvt_tile *zoom_lookup(void *user, int z, int x, int y) {
     zoom_scene *s = user;
@@ -220,7 +220,7 @@ static const cui_mvt_tile *zoom_lookup(void *user, int z, int x, int y) {
 static cui_texture zoom_image(void *user, int z, int x, int y) {
     zoom_scene *s = user;
     if (z == 0 && x == 0 && y == 0) return s->parent_ready ? s->parent : 0;
-    return s->child_ready && z == 1 && (s->all_children || (x == 0 && y == 0)) ? s->child : 0;
+    return s->child_raster_ready && z == 1 && (s->all_children || (x == 0 && y == 0)) ? s->child : 0;
 }
 static void zoom_request(void *user, int z, int x, int y) {
     (void)x; (void)y;
@@ -230,6 +230,7 @@ static void zoom_request(void *user, int z, int x, int y) {
 }
 static void zoom_frame(cui_ctx *ui, zoom_scene *s) {
     cui_map_opts opts = {0}; opts.lookup = zoom_lookup; opts.raster_lookup = zoom_image;
+    opts.defer_vector_base = s->defer_base;
     static const cui_map_marker marker[] = {{7, 0, 0, "Center"}};
     opts.markers = marker; opts.marker_count = 1;
     opts.request = zoom_request; opts.tile_user = s;
@@ -240,7 +241,7 @@ static void zoom_frame(cui_ctx *ui, zoom_scene *s) {
     cui_end_frame(ui);
 }
 static void check_zoom_fallback(const map_fixture_buf *raw) {
-    zoom_scene s = {0}; s.tile = cui_mvt_tile_decode(raw->b, raw->n); s.parent_ready = true;
+    zoom_scene s = {0}; s.tile = cui_mvt_tile_decode(raw->b, raw->n); s.parent_ready = true; s.defer_base = true;
     cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_DARK;
     cui_ctx *ui = cui_create(&desc);
     cui_sw_renderer *sw = cui_sw_create();
@@ -276,10 +277,14 @@ static void check_zoom_fallback(const map_fixture_buf *raw) {
             size_t p = ((size_t)220 * 256 + 220) * 4;
             CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
             CHECK(s.target_requests > 0 && s.source_requests == 0);
-            s.child_ready = true;
+            s.child_ready = true; /* decoded but not yet baked: keep source image */
             zoom_frame(ui, &s);
             cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
             p = ((size_t)32 * 256 + 32) * 4;
+            CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
+            s.child_raster_ready = true;
+            zoom_frame(ui, &s);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
             CHECK(screen[p] == 24 && screen[p + 1] == 174 && screen[p + 2] == 231);
             p = ((size_t)220 * 256 + 220) * 4;
             CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
@@ -309,7 +314,7 @@ static void check_zoom_fallback(const map_fixture_buf *raw) {
 }
 static void check_zoom_out_fallback(const map_fixture_buf *raw) {
     zoom_scene s = {0}; s.tile = cui_mvt_tile_decode(raw->b, raw->n);
-    s.view.zoom = 1; s.child_ready = s.all_children = true;
+    s.view.zoom = 1; s.child_ready = s.child_raster_ready = s.all_children = true;
     cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_DARK;
     cui_ctx *ui = cui_create(&desc);
     cui_sw_renderer *sw = cui_sw_create();

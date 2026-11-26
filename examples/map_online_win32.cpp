@@ -34,7 +34,7 @@ typedef struct {
     slot tiles[SLOTS]; map_demo_raster_slot images[SLOTS]; unsigned frame; size_t cache_bytes;
     cui_ctx *ui, *raster_ui; cui_sw_renderer *raster_sw;
     unsigned char *raster_pixels; size_t raster_capacity, raster_bytes, raster_tile_bytes;
-    float raster_scale;
+    float raster_scale; bool raster_failed;
     char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
     int pending, loaded; unsigned long long hits, misses, raster_hits, disk_hits, network_hits; DWORD last_status; uint64_t next_token;
     cui_map_view view;
@@ -245,6 +245,16 @@ static void raster_drop(demo *d, map_demo_raster_slot *s) {
     d->raster_bytes -= d->raster_tile_bytes;
     *s = map_demo_raster_slot{};
 }
+/* After the previous frame is presented, source-level images can make room
+ * for the target level even if the zoom fallback just displayed them. */
+static int raster_source_victim(const demo *d, int target_zoom) {
+    int oldest = -1;
+    for (int i = 0; i < SLOTS; i++) {
+        if (!d->images[i].raster || d->images[i].z == target_zoom) continue;
+        if (oldest < 0 || d->images[i].raster_used < d->images[oldest].raster_used) oldest = i;
+    }
+    return oldest;
+}
 /* Only called between frames: textures returned to the map remain alive until
  * cui_end_frame, even when decoded data is evicted or a tile is replaced. */
 static void raster_invalidate(demo *d) {
@@ -279,19 +289,21 @@ static bool raster_prepare(demo *d) {
     if (selected < 0) return false;
     while (d->raster_bytes > RASTER_BUDGET - bytes) {
         int victim = map_demo_raster_victim(d->images, SLOTS, d->frame - 1);
-        if (victim < 0) return false; /* keep visible tiles rather than thrash */
+        if (victim < 0) victim = raster_source_victim(d, d->tiles[selected].z);
+        if (victim < 0) return false; /* do not thrash visible target tiles */
         raster_drop(d, &d->images[victim]);
     }
     int image = -1;
     for (int i = 0; i < SLOTS; i++) if (!d->images[i].raster) { image = i; break; }
     if (image < 0) {
         image = map_demo_raster_victim(d->images, SLOTS, d->frame - 1);
+        if (image < 0) image = raster_source_victim(d, d->tiles[selected].z);
         if (image < 0) return false;
         raster_drop(d, &d->images[image]);
     }
     if (d->raster_capacity < bytes) {
         void *next = realloc(d->raster_pixels, bytes);
-        if (!next) return false;
+        if (!next) { d->raster_failed = true; return false; }
         d->raster_pixels = static_cast<unsigned char *>(next); d->raster_capacity = bytes;
     }
     slot *s = &d->tiles[selected];
@@ -301,6 +313,7 @@ static bool raster_prepare(demo *d) {
     cui_sw_render(d->raster_sw, cui_get_draw_data(d->raster_ui), d->raster_pixels,
                   pixels, pixels, pixels * 4, CUI_SW_RGBA);
     cui_texture texture = cui_image_create(d->ui, pixels, pixels, d->raster_pixels);
+    if (!texture) d->raster_failed = true;
     if (texture) {
         d->images[image] = map_demo_raster_slot{s->z, s->x, s->y, texture, d->frame};
         d->raster_bytes += bytes;
@@ -599,6 +612,11 @@ int main(void) {
         cui_map_opts options = {};
         options.lookup = tile_lookup;
         if (!getenv("CUI_MAP_DEMO_DISABLE_RASTER")) options.raster_lookup = raster_lookup;
+        float image_scale = cui_dpi_scale(ui);
+        int image_pixels = image_scale > 0 && image_scale <= 4 ? (int)(256 * image_scale + 0.5f) : 0;
+        options.defer_vector_base = options.raster_lookup && d->raster_ui && d->raster_sw &&
+                                    !d->raster_failed && image_scale > 0 && image_scale <= 4 &&
+                                    (size_t)image_pixels * image_pixels * 4 <= RASTER_BUDGET;
         options.request = tile_request; options.tile_user = d;
         options.markers = markers; options.marker_count = 2;
         options.min_zoom = d->min_zoom; options.max_zoom = d->max_zoom ? d->max_zoom : 14;
@@ -607,7 +625,8 @@ int main(void) {
             slot *s = &d->tiles[i];
             if (s->state == 2 && s->used == d->frame && !raster_find(d, s->z, s->x, s->y) &&
                 (d->raster_bytes <= RASTER_BUDGET - d->raster_tile_bytes ||
-                 map_demo_raster_victim(d->images, SLOTS, d->frame - 1) >= 0)) {
+                 map_demo_raster_victim(d->images, SLOTS, d->frame - 1) >= 0 ||
+                 raster_source_victim(d, s->z) >= 0)) {
                 cui_request_redraw(ui); break;
             }
         }

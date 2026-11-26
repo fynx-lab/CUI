@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Add opt-in `defer_vector_base` for raster-backed maps: while a decoded tile waits for its image, display cached source-level imagery or a placeholder rather than repeatedly drawing full vectors. The Windows demo enables it during raster baking; other hosts keep vector fallback. Markers and place labels stay live.
 - Refine map road thresholds: motorway-only at z0–5, add trunk at z6–8, primary at z9–10, secondary at z11–12, and all road classes at z13+. Waterway lines still start at z10. Apply the same zoom rules to vector fallback and host-baked tile images without changing tile downloads or stored data.
 - Add a host-only per-user file cache for the Windows OpenFreeMap map demo: decoded memory → validated on-disk MVT bytes → network for visible tiles. Save only successfully decoded 200 responses under a source-version namespace, with atomic writes, last-good validated TileJSON for network outages, an online refresh action, and no automatic disk eviction. The C99 core and RAM budgets remain unchanged.
 - Double the Windows map demo's decoded cache from 96 MiB/192 entries to 192 MiB/384 entries and its independent rendered-image cache from 48 MiB/192 entries to 96 MiB/384 entries. Keep viewport-only requests, one tile image baked per frame, and the 2 MiB uncompressed input bound unchanged.

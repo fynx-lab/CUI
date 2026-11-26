@@ -132,7 +132,7 @@ static int bench_drag(const char *path) {
     return drag < still / 2 ? 0 : 1;
 }
 
-typedef struct { cui_mvt_tile *tile; cui_texture raster; } raster_test;
+typedef struct { cui_mvt_tile *tile; cui_texture raster; const cui_map_palette *palette; } raster_test;
 static const cui_mvt_tile *raster_test_lookup(void *u, int z, int x, int y) {
     raster_test *test = u;
     return z == 0 && x == 0 && y == 0 ? test->tile : NULL;
@@ -145,6 +145,7 @@ static void raster_test_frame(cui_ctx *ui, raster_test *test, bool cached) {
     cui_map_view view = {0, 0, 0};
     cui_map_opts opts = {0};
     opts.lookup = raster_test_lookup; opts.tile_user = test;
+    opts.palette = test->palette;
     if (cached) opts.raster_lookup = raster_test_image;
     cui_begin_frame(ui, 1.f/60);
     cui_column(ui, .width = CUI_FILL, .height = CUI_FILL) {
@@ -152,12 +153,13 @@ static void raster_test_frame(cui_ctx *ui, raster_test *test, bool cached) {
     }
     cui_end_frame(ui);
 }
-static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
+static void check_raster_fallback(const map_fixture_buf *raw, int scale,
+                                  cui_theme_mode mode, bool custom) {
     cui_mvt_tile *tile = cui_mvt_tile_decode(raw->b, raw->n);
     CHECK(tile != NULL);
     if (!tile) return;
     cui_sw_renderer *off_sw = cui_sw_create(), *main_sw = cui_sw_create();
-    cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_LIGHT; desc.no_default_fonts = true;
+    cui_ctx_desc desc = {0}; desc.theme = mode; desc.no_default_fonts = true;
     cui_ctx *off = cui_create(&desc), *ui = cui_create(&desc);
     CHECK(off && ui && off_sw && main_sw);
     if (off && ui && off_sw && main_sw) {
@@ -166,15 +168,18 @@ static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
         unsigned char *off_px = malloc(bytes), *vector_px = malloc(bytes), *cached_px = malloc(bytes), *image_only_px = malloc(bytes);
         CHECK(off_px && vector_px && cached_px && image_only_px);
         if (off_px && vector_px && cached_px && image_only_px) {
+            cui_map_palette palette = cui_map_palette_default(mode);
+            if (custom) { palette.land = CUI_RGB(0x514A42); palette.water = CUI_RGB(0x88AABB); }
             cui_set_viewport(off, 256, 256, (float)scale);
             cui_begin_frame(off, 1.f/60);
-            cui_map_tile_draw_base(off, tile, (cui_rect){0, 0, 256, 256}, 0);
+            cui_map_tile_draw_base_styled(off, tile, (cui_rect){0, 0, 256, 256}, 0,
+                                           custom ? &palette : NULL);
             cui_end_frame(off);
             cui_sw_render(off_sw, cui_get_draw_data(off), off_px, px, px, px * 4, CUI_SW_RGBA);
             cui_renderer_iface iface = cui_sw_iface(main_sw);
             cui_set_renderer(ui, &iface);
             cui_set_viewport(ui, 256, 256, (float)scale);
-            raster_test test = {tile, 0};
+            raster_test test = {tile, 0, custom ? &palette : NULL};
             raster_test_frame(ui, &test, false); raster_test_frame(ui, &test, false);
             int normal_vertices = cui_get_draw_data(ui)->vertex_count;
             cui_sw_render(main_sw, cui_get_draw_data(ui), vector_px, px, px, px * 4, CUI_SW_RGBA);
@@ -573,8 +578,13 @@ int main(int argc, char **argv) {
         cui_mvt_tile_destroy(park);
     }
     map_fixture_buf base_fixture = map_fixture();
-    check_raster_fallback(&base_fixture, 1);
-    check_raster_fallback(&base_fixture, 2);
+    cui_map_palette light = cui_map_palette_default(CUI_THEME_LIGHT);
+    cui_map_palette dark = cui_map_palette_default(CUI_THEME_DARK);
+    CHECK(light.land.r > dark.land.r && light.place_text.r < dark.place_text.r);
+    CHECK(light.water.r != dark.water.r && light.road_major.r != dark.road_major.r);
+    check_raster_fallback(&base_fixture, 1, CUI_THEME_LIGHT, false);
+    check_raster_fallback(&base_fixture, 2, CUI_THEME_DARK, false);
+    check_raster_fallback(&base_fixture, 1, CUI_THEME_DARK, true);
     check_zoom_fallback(&base_fixture);
     check_zoom_out_fallback(&base_fixture);
     check_labels_cover_large_view();

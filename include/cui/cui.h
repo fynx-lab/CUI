@@ -5146,8 +5146,18 @@ CUI_API cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size);
 /* Approximate owned heap bytes, including reserved geometry capacities; NULL is zero. */
 CUI_API size_t cui_mvt_tile_memory_usage(const cui_mvt_tile *tile);
 CUI_API void cui_mvt_tile_destroy(cui_mvt_tile *tile);
-/* Draw only the decoded tile's base geometry at logical 256x256 size (no
- * labels or markers); useful for a host-managed offscreen raster cache. */
+/* Application-owned flat map colors. Obtain a theme-aware starting point
+ * with cui_map_palette_default(), then override only the desired fields. */
+typedef struct cui_map_palette {
+    cui_color land, water, parks, road_major, road_minor;
+    cui_color place_text, placeholder, marker_halo;
+} cui_map_palette;
+CUI_API cui_map_palette cui_map_palette_default(cui_theme_mode mode);
+/* Draw only decoded base geometry at logical 256x256 (no labels or markers).
+ * The styled variant lets host-baked images match the widget's palette.
+ * NULL selects the current UI theme's default. */
+CUI_API void cui_map_tile_draw_base_styled(cui_ctx *ui, const cui_mvt_tile *tile,
+                                            cui_rect rect, int zoom, const cui_map_palette *palette);
 CUI_API void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom);
 typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_view;
 typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;
@@ -5170,6 +5180,7 @@ typedef struct cui_map_opts {
     bool defer_vector_base;           /* if raster_lookup misses, use cached source imagery or placeholder
                                        * while the host prepares the image; labels and markers stay live.
                                        * Default false retains immediate vector drawing. */
+    const cui_map_palette *palette;    /* NULL follows this CUI context's light/dark theme; copied per frame */
 } cui_map_opts;
 typedef struct cui_map_result {
     bool view_changed;

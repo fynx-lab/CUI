@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Match map colors to CUI's neutral light/dark visual system. Applications can pass a theme-aware `cui_map_palette` to the widget and styled offscreen tile baker; the Windows demo follows the OS theme, uses blue accent, offers a sun/moon toggle and invalidates baked images on theme/base-palette change without re-downloading tile data.
 - Add opt-in `defer_vector_base` for raster-backed maps: while a decoded tile waits for its image, display cached source-level imagery or a placeholder rather than repeatedly drawing full vectors. The Windows demo enables it during raster baking; other hosts keep vector fallback. Markers and place labels stay live.
 - Refine map road thresholds: motorway-only at z0–5, add trunk at z6–8, primary at z9–10, secondary at z11–12, and all road classes at z13+. Waterway lines still start at z10. Apply the same zoom rules to vector fallback and host-baked tile images without changing tile downloads or stored data.
 - Add a host-only per-user file cache for the Windows OpenFreeMap map demo: decoded memory → validated on-disk MVT bytes → network for visible tiles. Save only successfully decoded 200 responses under a source-version namespace, with atomic writes, last-good validated TileJSON for network outages, an online refresh action, and no automatic disk eviction. The C99 core and RAM budgets remain unchanged.

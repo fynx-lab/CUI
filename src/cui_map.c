@@ -291,6 +291,7 @@ static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
 typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; int z, tx, ty; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
+    cui_map_palette palette;
     int z, count, fallback_count; float scale; bool dragging, defer_vector_base;
     map_ref refs[MAP_REFS], fallback[MAP_REFS];
 } map_paint;
@@ -307,6 +308,18 @@ static double map_lat(double y, int z) {
 static double map_world_x(double lon, int z) { return (lon + 180.0) / 360.0 * (256.0 * (1 << z)); }
 static double map_lon(double x, int z) { return x / (256.0 * (1 << z)) * 360.0 - 180.0; }
 static double map_wrap(double x, double size) { x = fmod(x, size); return x < 0 ? x + size : x; }
+cui_map_palette cui_map_palette_default(cui_theme_mode mode) {
+    if (mode == CUI_THEME_DARK) {
+        cui_map_palette p = {CUI_RGB(0x202326), CUI_RGB(0x233844), CUI_RGB(0x2C3934),
+                             CUI_RGB(0x8C979E), CUI_RGB(0x566169), CUI_RGB(0xE1E4E5),
+                             CUI_RGB(0x262A2D), CUI_RGB(0xF3F4F5)};
+        return p;
+    }
+    cui_map_palette p = {CUI_RGB(0xF4F5F4), CUI_RGB(0xD7E8EE), CUI_RGB(0xE3EBE5),
+                         CUI_RGB(0xB3BEC6), CUI_RGB(0xD4DBDF), CUI_RGB(0x273138),
+                         CUI_RGB(0xEDF0F1), CUI_RGB(0xFFFFFF)};
+    return p;
+}
 static void map_road(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_feature *f, cui_color c, float width) {
     cui_vec2 pts[4096];
     for (int j = 0; j < f->count; j++) {
@@ -320,19 +333,15 @@ static void map_road(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
         cui_draw_polyline(ui, pts, path.count, width * (r.w / 256.0f), c, false);
     }
 }
-static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z, bool dragging) {
-    bool dark = ui->mode == CUI_THEME_DARK;
-    cui_color land = dark ? cui__rgba(38, 46, 52, 255) : cui__rgba(232, 233, 224, 255);
-    cui_color water = dark ? cui__rgba(39, 74, 91, 255) : cui__rgba(153, 196, 214, 255);
-    cui_color parks = dark ? cui__rgba(42, 60, 51, 255) : cui__rgba(207, 223, 199, 255);
-    cui_color roads = dark ? cui__rgba(137, 145, 145, 255) : cui__rgba(255, 255, 255, 255);
-    cui_draw_rect(ui, r, CUI_CORNERS(0), land);
+static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z, bool dragging,
+                          const cui_map_palette *palette) {
+    cui_draw_rect(ui, r, CUI_CORNERS(0), palette->land);
     if (!t) return;
     cui_push_clip(ui, r);
     for (int pass = 1; pass <= 3; pass++) for (int j = 0; j < t->nfeatures; j++) {
         const map_feature *f = &t->features[j];
-        if (pass == 1 && f->kind == 4 && !dragging) map_fill(ui, r, t, f, parks);
-        if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, water);
+        if (pass == 1 && f->kind == 4 && !dragging) map_fill(ui, r, t, f, palette->parks);
+        if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, palette->water);
         if (pass == 3 && (f->kind == 2 || f->kind == 5)) {
             bool motorway = !strcmp(f->class_name, "motorway"), trunk = !strcmp(f->class_name, "trunk");
             bool primary = !strcmp(f->class_name, "primary"), secondary = !strcmp(f->class_name, "secondary");
@@ -346,20 +355,24 @@ static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z,
             float width = z <= 6 ? 0.75f : z <= 8 ? 0.95f :
                           motorway ? (z >= 11 ? 2.8f : 1.8f) :
                           major ? (z >= 11 ? 1.7f : 1.15f) : (z >= 12 ? 0.9f : 0.65f);
-            cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
-            map_road(ui, r, t, f, f->kind == 5 ? water : major ? roads : minor, width);
+            map_road(ui, r, t, f, f->kind == 5 ? palette->water :
+                     major ? palette->road_major : palette->road_minor, width);
         }
     }
     cui_pop_clip(ui);
 }
+void cui_map_tile_draw_base_styled(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect,
+                                   int zoom, const cui_map_palette *palette) {
+    if (!ui || !tile || zoom < 0 || zoom > 20) return;
+    cui_map_palette base = palette ? *palette : cui_map_palette_default(ui->mode);
+    map_draw_base(ui, tile, rect, zoom, false, &base);
+}
 void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom) {
-    if (ui && tile && zoom >= 0 && zoom <= 20) map_draw_base(ui, tile, rect, zoom, false);
+    cui_map_tile_draw_base_styled(ui, tile, rect, zoom, NULL);
 }
 static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     map_paint *m = data;
-    bool dark = ui->mode == CUI_THEME_DARK;
-    cui_color land = dark ? cui__rgba(38, 46, 52, 255) : cui__rgba(232, 233, 224, 255);
-    cui_draw_rect(ui, bounds, CUI_CORNERS(0), land);
+    cui_draw_rect(ui, bounds, CUI_CORNERS(0), m->palette.land);
     int labels = 0; cui_rect used[MAP_LABELS];
     double center_x = map_world_x(m->view.longitude, m->z) * m->scale;
     double center_y = map_world_y(m->view.latitude, m->z) * m->scale;
@@ -388,11 +401,10 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                     sr.y >= r.y + r.h || sr.y + sr.h <= r.y) continue;
                 if (src->image) cui_draw_image(ui, src->image, sr, (cui_rect){0, 0, 1, 1},
                                                CUI_CORNERS(0), cui__rgba(255, 255, 255, 255));
-                else if (src->tile && !m->defer_vector_base) map_draw_base(ui, src->tile, sr, src->z, false);
+                else if (src->tile && !m->defer_vector_base) map_draw_base(ui, src->tile, sr, src->z, false, &m->palette);
                 filled = true;
             }
-            if (!filled) cui_draw_rect(ui, r, CUI_CORNERS(0),
-                                      dark ? cui__rgba(45, 54, 60, 255) : cui__rgba(224, 227, 218, 255));
+            if (!filled) cui_draw_rect(ui, r, CUI_CORNERS(0), m->palette.placeholder);
             cui_pop_clip(ui);
             cui_pop_clip(ui);
             continue;
@@ -401,7 +413,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_push_clip(ui, r);
             cui_draw_image(ui, m->refs[i].image, r, (cui_rect){0, 0, 1, 1}, CUI_CORNERS(0), cui__rgba(255, 255, 255, 255));
             cui_pop_clip(ui);
-        } else map_draw_base(ui, t, r, m->z, m->dragging);
+        } else map_draw_base(ui, t, r, m->z, m->dragging, &m->palette);
     }
     /* Cells follow tile/world coordinates, not the viewport. An interior
      * place keeps its cell while panning instead of losing its quota whenever
@@ -440,8 +452,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                     cell_keys[cell] = key;
                     cell_counts[cell]++;
                     used[labels++] = box;
-                    cui_draw_text(ui, CUI_FONT_BODY, 12, pos,
-                                  dark ? cui__rgba(233, 235, 232, 255) : cui__rgba(41, 55, 59, 255), f->name, -1);
+                    cui_draw_text(ui, CUI_FONT_BODY, 12, pos, m->palette.place_text, f->name, -1);
                 }
             }
         }
@@ -455,7 +466,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         cui_vec2 p = {bounds.x + bounds.w / 2 + (float)dx,
                       bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) * m->scale - cy)};
         if (p.x < bounds.x - 8 || p.x > bounds.x + bounds.w + 8 || p.y < bounds.y - 8 || p.y > bounds.y + bounds.h + 8) continue;
-        cui_draw_circle(ui, p, 6, cui__rgba(255, 255, 255, 255));
+        cui_draw_circle(ui, p, 6, m->palette.marker_halo);
         cui_draw_circle(ui, p, 4, CUI_C(ui, ACCENT));
         if (mark->label) cui_draw_text(ui, CUI_FONT_BODY, 12, (cui_vec2){p.x + 9, p.y - 7}, CUI_C(ui, FOREGROUND), mark->label, -1);
     }
@@ -526,6 +537,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     view->longitude = map_lon(map_wrap(map_world_x(view->longitude, z), 256.0 * (1 << z)), z);
     map_paint *m = CUI_PAINT_DATA(ui, map_paint);
     memset(m, 0, sizeof *m);
+    m->palette = opts && opts->palette ? *opts->palette : cui_map_palette_default(ui->mode);
     cui_canvas_opts canvas = {0}; canvas.focusable = true;
     cui_size w = opts && opts->width.kind ? opts->width : CUI_FILL;
     cui_size h = opts && opts->height.kind ? opts->height : CUI_FILL;

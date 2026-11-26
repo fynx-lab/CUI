@@ -34,7 +34,9 @@ typedef struct {
     slot tiles[SLOTS]; map_demo_raster_slot images[SLOTS]; unsigned frame; size_t cache_bytes;
     cui_ctx *ui, *raster_ui; cui_sw_renderer *raster_sw;
     unsigned char *raster_pixels; size_t raster_capacity, raster_bytes, raster_tile_bytes;
-    float raster_scale; bool raster_failed;
+    float raster_scale; bool raster_failed, raster_palette_valid;
+    cui_theme_mode raster_mode;
+    cui_map_palette raster_palette;
     char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
     int pending, loaded; unsigned long long hits, misses, raster_hits, disk_hits, network_hits; DWORD last_status; uint64_t next_token;
     cui_map_view view;
@@ -274,9 +276,16 @@ static bool raster_prepare(demo *d) {
     int pixels = (int)(256 * scale + 0.5f);
     size_t bytes = (size_t)pixels * pixels * 4;
     if (bytes > RASTER_BUDGET) return false;
-    if (d->raster_scale != scale) {
-        raster_invalidate(d); d->raster_scale = scale;
-        d->raster_tile_bytes = bytes;
+    cui_theme_mode mode = cui_get_theme_mode(d->ui);
+    cui_map_palette palette = cui_map_palette_default(mode);
+    /* Only base colors are baked. Place text, placeholders and markers stay
+     * live, but any base-color or mode change invalidates old tile imagery. */
+    if (!d->raster_palette_valid || d->raster_scale != scale || d->raster_mode != mode ||
+        memcmp(&d->raster_palette.land, &palette.land, 5 * sizeof(cui_color))) {
+        raster_invalidate(d);
+        d->raster_scale = scale; d->raster_tile_bytes = bytes;
+        d->raster_mode = mode; d->raster_palette = palette; d->raster_palette_valid = true;
+        cui_set_theme(d->raster_ui, mode);
         cui_set_viewport(d->raster_ui, 256, 256, scale);
     }
     int selected = -1;
@@ -308,7 +317,7 @@ static bool raster_prepare(demo *d) {
     }
     slot *s = &d->tiles[selected];
     cui_begin_frame(d->raster_ui, 1.f / 60);
-    cui_map_tile_draw_base(d->raster_ui, s->tile, cui_rect{0, 0, 256, 256}, s->z);
+    cui_map_tile_draw_base_styled(d->raster_ui, s->tile, cui_rect{0, 0, 256, 256}, s->z, &palette);
     cui_end_frame(d->raster_ui);
     cui_sw_render(d->raster_sw, cui_get_draw_data(d->raster_ui), d->raster_pixels,
                   pixels, pixels, pixels * 4, CUI_SW_RGBA);
@@ -485,7 +494,9 @@ int main(void) {
     desc.width = getenv("CUI_MAP_DEMO_SMALL") ? 460 : 1000;
     desc.height = getenv("CUI_MAP_DEMO_SMALL") ? 360 : 680;
     desc.min_width = 450; desc.min_height = 360;
-    desc.theme = CUI_THEME_DARK;
+    desc.theme = CUI_THEME_LIGHT;
+    desc.follow_system_theme = true;
+    desc.accent = CUI_ACCENT_BLUE;
     /* Dense vector geometry can make the default GL driver's staging buffers
      * dwarf the decoded-tile cache. Keep this example's memory predictable;
      * CUI's renderer default and map widget are unchanged. */
@@ -496,7 +507,7 @@ int main(void) {
     d->ui = cui_app_ui(app);
     install_local_cjk_fallback(d->ui);
     cui_ctx_desc raster_desc = {};
-    raster_desc.theme = CUI_THEME_DARK; raster_desc.no_default_fonts = true;
+    raster_desc.theme = cui_get_theme_mode(d->ui); raster_desc.no_default_fonts = true;
     d->raster_ui = cui_create(&raster_desc);
     d->raster_sw = cui_sw_create();
     if (!d->raster_ui || !d->raster_sw) {
@@ -608,8 +619,20 @@ int main(void) {
         } else if (d->pending) {
             cui_textf(ui, "Loading %d tiles · %d ready", d->pending, d->loaded);
         } else cui_secondary(ui, "Drag to pan  ·  Wheel to zoom  ·  Arrow keys to move");
+        cui_button_opts theme_toggle = {};
+        theme_toggle.tooltip = "Switch map between light and dark";
+        if (cui_icon_button_ex(ui, cui_get_theme_mode(ui) == CUI_THEME_DARK ? CUI_ICON_SUN : CUI_ICON_MOON,
+                               &theme_toggle)) {
+            cui_app_follow_system_theme(app, false);
+            cui_set_theme(ui, cui_get_theme_mode(ui) == CUI_THEME_DARK ? CUI_THEME_LIGHT : CUI_THEME_DARK);
+            raster_invalidate(d);
+            d->raster_palette_valid = false;
+            cui_request_redraw(ui);
+        }
         cui_box_end(ui);
         cui_map_opts options = {};
+        cui_map_palette palette = cui_map_palette_default(cui_get_theme_mode(ui));
+        options.palette = &palette;
         options.lookup = tile_lookup;
         if (!getenv("CUI_MAP_DEMO_DISABLE_RASTER")) options.raster_lookup = raster_lookup;
         float image_scale = cui_dpi_scale(ui);

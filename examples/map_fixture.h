@@ -40,7 +40,7 @@ static map_fixture_buf map_fixture_layer(const char *name) {
     return tile;
 }
 static map_fixture_buf map_fixture(void) { return map_fixture_layer("water"); }
-static map_fixture_buf map_fixture_road(const char *road_class) {
+static map_fixture_buf map_fixture_line(const char *layer_name, const char *road_class) {
     map_fixture_buf geom = {{0}, 0}, feature = {{0}, 0}, value = {{0}, 0};
     map_fixture_buf layer = {{0}, 0}, tile = {{0}, 0}, tags = {{0}, 0};
     map_fixture_var(&geom, 9); map_fixture_coord(&geom, 0); map_fixture_coord(&geom, 0);
@@ -50,12 +50,15 @@ static map_fixture_buf map_fixture_road(const char *road_class) {
     map_fixture_field(&feature, 3, 2);
     map_fixture_nested(&feature, 4, geom.b, geom.n);
     map_fixture_nested(&value, 1, road_class, strlen(road_class));
-    map_fixture_nested(&layer, 1, "transportation", 14);
+    map_fixture_nested(&layer, 1, layer_name, strlen(layer_name));
     map_fixture_nested(&layer, 2, feature.b, feature.n);
     map_fixture_nested(&layer, 3, "class", 5);
     map_fixture_nested(&layer, 4, value.b, value.n);
     map_fixture_field(&layer, 5, 4096); map_fixture_field(&layer, 15, 2);
     map_fixture_nested(&tile, 3, layer.b, layer.n);
     return tile;
+}
+static map_fixture_buf map_fixture_road(const char *road_class) {
+    return map_fixture_line("transportation", road_class);
 }
 #endif

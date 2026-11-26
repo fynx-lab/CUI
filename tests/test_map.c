@@ -435,8 +435,8 @@ static void check_labels_stable_across_pan(void) {
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
 }
-static int road_vertices(int zoom, const char *road_class) {
-    map_fixture_buf raw = map_fixture_road(road_class);
+static int line_vertices(int zoom, const char *layer, const char *road_class) {
+    map_fixture_buf raw = map_fixture_line(layer, road_class);
     cui_mvt_tile *tile = cui_mvt_tile_decode(raw.b, raw.n);
     if (!tile) return -1;
     cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_DARK});
@@ -451,6 +451,9 @@ static int road_vertices(int zoom, const char *road_class) {
     int vertices = cui_get_draw_data(ui)->vertex_count;
     cui_destroy(ui); cui_mvt_tile_destroy(tile);
     return vertices;
+}
+static int road_vertices(int zoom, const char *road_class) {
+    return line_vertices(zoom, "transportation", road_class);
 }
 static const cui_mvt_tile *lookup(void *user, int z, int x, int y) {
     scene *s = user; return z == 0 && x == 0 && y == 0 ? s->tile : NULL;
@@ -580,10 +583,14 @@ int main(int argc, char **argv) {
     cui_mvt_tile *observed_values = observed_place_values_tile();
     CHECK(observed_values != NULL);
     cui_mvt_tile_destroy(observed_values);
-    CHECK(road_vertices(6, "motorway") > road_vertices(6, "primary"));
+    CHECK(road_vertices(7, "motorway") > road_vertices(7, "primary"));
     CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
+    CHECK(road_vertices(9, "primary") > road_vertices(9, "secondary"));
     CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));
-    CHECK(road_vertices(11, "residential") > road_vertices(10, "residential"));
+    CHECK(road_vertices(11, "secondary") > road_vertices(11, "residential"));
+    CHECK(road_vertices(12, "secondary") > road_vertices(12, "residential"));
+    CHECK(road_vertices(13, "residential") > road_vertices(12, "residential"));
+    CHECK(line_vertices(10, "waterway", "stream") > line_vertices(9, "waterway", "stream"));
     fprintf(stderr, "map tests: %s\n", failures ? "FAILED" : "OK");
     return failures ? 1 : 0;
 }

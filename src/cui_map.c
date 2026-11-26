@@ -337,10 +337,10 @@ static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z,
             bool motorway = !strcmp(f->class_name, "motorway"), trunk = !strcmp(f->class_name, "trunk");
             bool primary = !strcmp(f->class_name, "primary"), secondary = !strcmp(f->class_name, "secondary");
             bool major = motorway || trunk || primary || secondary;
-            if (f->kind == 5 && z <= 8) continue;
-            if (f->kind == 2 && ((z <= 6 && !(motorway || trunk)) ||
-                                 (z <= 8 && !(motorway || trunk || primary)) ||
-                                 (z <= 10 && !major) || (dragging && !major))) continue;
+            if (f->kind == 5 && z < 10) continue;
+            if (f->kind == 2 && ((z <= 7 && !(motorway || trunk)) ||
+                                 (z <= 9 && !(motorway || trunk || primary)) ||
+                                 (z <= 12 && !major) || (dragging && !major))) continue;
             if (dragging && f->kind == 5) continue;
             float width = z <= 6 ? 0.75f : z <= 8 ? 0.95f :
                           motorway ? (z >= 11 ? 2.8f : 1.8f) :

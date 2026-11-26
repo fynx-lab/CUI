@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Show only motorway/trunk roads at z0–7, add primary at z8–9, secondary at z10–12, all road classes at z13+, and start drawing waterway lines at z10. Apply the same zoom rules to vector fallback and host-baked tile images without changing tile downloads or stored data.
 - Add a host-only per-user file cache for the Windows OpenFreeMap map demo: decoded memory → validated on-disk MVT bytes → network for visible tiles. Save only successfully decoded 200 responses under a source-version namespace, with atomic writes, last-good validated TileJSON for network outages, an online refresh action, and no automatic disk eviction. The C99 core and RAM budgets remain unchanged.
 - Double the Windows map demo's decoded cache from 96 MiB/192 entries to 192 MiB/384 entries and its independent rendered-image cache from 48 MiB/192 entries to 96 MiB/384 entries. Keep viewport-only requests, one tile image baked per frame, and the 2 MiB uncompressed input bound unchanged.
 - Anchor place-label distribution to tile/world coordinates rather than viewport grid lines, so interior labels do not switch quota cells when panning. Keep the 192-label cap, two-pass collision checks and marker precedence; no city/town ranking is implied.

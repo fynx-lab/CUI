@@ -24,6 +24,15 @@ bool map_demo_retry_due(const map_demo_slot &slot, unsigned now) {
            (int32_t)(now - slot.next_retry_tick) >= 0;
 }
 
+int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previous_frame) {
+    int oldest = -1;
+    for (int i = 0; i < count; i++) {
+        if (!slots[i].raster || slots[i].raster_used == previous_frame) continue;
+        if (oldest < 0 || slots[i].raster_used < slots[oldest].raster_used) oldest = i;
+    }
+    return oldest;
+}
+
 unsigned map_demo_retry_delay_ms(int attempt, unsigned retry_after_ms, unsigned jitter_ms) {
     if (attempt < 1 || attempt >= 3) return 0;
     if (retry_after_ms) return retry_after_ms > 30000 ? 30000 : retry_after_ms;

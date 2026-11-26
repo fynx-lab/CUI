@@ -95,6 +95,69 @@ static int bench_drag(const char *path) {
     return drag < still / 2 ? 0 : 1;
 }
 
+typedef struct { cui_mvt_tile *tile; cui_texture raster; } raster_test;
+static const cui_mvt_tile *raster_test_lookup(void *u, int z, int x, int y) {
+    raster_test *test = u;
+    return z == 0 && x == 0 && y == 0 ? test->tile : NULL;
+}
+static cui_texture raster_test_image(void *u, int z, int x, int y) {
+    raster_test *test = u;
+    return z == 0 && x == 0 && y == 0 ? test->raster : 0;
+}
+static void raster_test_frame(cui_ctx *ui, raster_test *test, bool cached) {
+    cui_map_view view = {0, 0, 0};
+    cui_map_opts opts = {0};
+    opts.lookup = raster_test_lookup; opts.tile_user = test;
+    if (cached) opts.raster_lookup = raster_test_image;
+    cui_begin_frame(ui, 1.f/60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL) {
+        cui_map_ex(ui, "raster-test", &view, &opts);
+    }
+    cui_end_frame(ui);
+}
+static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
+    cui_mvt_tile *tile = cui_mvt_tile_decode(raw->b, raw->n);
+    CHECK(tile != NULL);
+    if (!tile) return;
+    cui_sw_renderer *off_sw = cui_sw_create(), *main_sw = cui_sw_create();
+    cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_LIGHT; desc.no_default_fonts = true;
+    cui_ctx *off = cui_create(&desc), *ui = cui_create(&desc);
+    CHECK(off && ui && off_sw && main_sw);
+    if (off && ui && off_sw && main_sw) {
+        int px = 256 * scale;
+        size_t bytes = (size_t)px * px * 4;
+        unsigned char *off_px = malloc(bytes), *vector_px = malloc(bytes), *cached_px = malloc(bytes);
+        CHECK(off_px && vector_px && cached_px);
+        if (off_px && vector_px && cached_px) {
+            cui_set_viewport(off, 256, 256, (float)scale);
+            cui_begin_frame(off, 1.f/60);
+            cui_map_tile_draw_base(off, tile, (cui_rect){0, 0, 256, 256}, 0);
+            cui_end_frame(off);
+            cui_sw_render(off_sw, cui_get_draw_data(off), off_px, px, px, px * 4, CUI_SW_RGBA);
+            cui_renderer_iface iface = cui_sw_iface(main_sw);
+            cui_set_renderer(ui, &iface);
+            cui_set_viewport(ui, 256, 256, (float)scale);
+            raster_test test = {tile, 0};
+            raster_test_frame(ui, &test, false); raster_test_frame(ui, &test, false);
+            int normal_vertices = cui_get_draw_data(ui)->vertex_count;
+            cui_sw_render(main_sw, cui_get_draw_data(ui), vector_px, px, px, px * 4, CUI_SW_RGBA);
+            test.raster = cui_image_create(ui, px, px, off_px);
+            CHECK(test.raster != 0);
+            raster_test_frame(ui, &test, true);
+            int cached_vertices = cui_get_draw_data(ui)->vertex_count;
+            cui_sw_render(main_sw, cui_get_draw_data(ui), cached_px, px, px, px * 4, CUI_SW_RGBA);
+            CHECK(cached_vertices < normal_vertices);
+            for (int y = 16; y < 240; y += 32) for (int x = 16; x < 240; x += 32) {
+                size_t p = (size_t)((y * scale) * px + x * scale) * 4;
+                CHECK(memcmp(vector_px + p, cached_px + p, 3) == 0);
+            }
+            cui_image_destroy(ui, test.raster);
+        }
+        free(off_px); free(vector_px); free(cached_px);
+    }
+    cui_destroy(off); cui_destroy(ui); cui_sw_destroy(off_sw); cui_sw_destroy(main_sw);
+    cui_mvt_tile_destroy(tile);
+}
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
 }
@@ -226,6 +289,9 @@ int main(int argc, char **argv) {
         }
         cui_mvt_tile_destroy(park);
     }
+    map_fixture_buf base_fixture = map_fixture();
+    check_raster_fallback(&base_fixture, 1);
+    check_raster_fallback(&base_fixture, 2);
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

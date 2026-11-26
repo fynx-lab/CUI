@@ -54,6 +54,16 @@ int main() {
     CHECK(!map_demo_retry_due(failed, 50000));
     map_demo_note_failure(failed, 0, 0, 0xfffffff0u);
     CHECK(map_demo_retry_due(failed, 0x3a88u)); /* tick wrap at 15000ms */
+    map_demo_slot images[4] = {};
+    images[0].raster = 1; images[0].raster_used = 4;
+    images[1].raster = 2; images[1].raster_used = 2;
+    images[2].raster = 3; images[2].raster_used = 6;
+    CHECK(map_demo_raster_victim(images, 4, 6) == 1);
+    images[1].raster = 0;
+    CHECK(map_demo_raster_victim(images, 4, 6) == 0);
+    images[0].raster_used = 6;
+    CHECK(map_demo_raster_victim(images, 4, 6) == -1);
+    CHECK(map_demo_raster_victim(images, 4, 7) == 0);
     std::fprintf(stderr, "map demo jobs tests: %s\n", errors ? "FAILED" : "OK");
     return errors ? 1 : 0;
 }

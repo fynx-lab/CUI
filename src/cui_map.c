@@ -282,7 +282,7 @@ static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
                                     s.height + 0.02f}, CUI_CORNERS(0), color);
     }
 }
-typedef struct { const cui_mvt_tile *tile; float x, y; } map_ref;
+typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
     int z, count; bool dragging; map_ref refs[MAP_REFS];
@@ -312,13 +312,44 @@ static void map_road(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
         cui_draw_polyline(ui, pts, path.count, width, c, false);
     }
 }
-static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
-    map_paint *m = data;
+static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z, bool dragging) {
     bool dark = ui->mode == CUI_THEME_DARK;
     cui_color land = dark ? cui__rgba(38, 46, 52, 255) : cui__rgba(232, 233, 224, 255);
     cui_color water = dark ? cui__rgba(39, 74, 91, 255) : cui__rgba(153, 196, 214, 255);
     cui_color parks = dark ? cui__rgba(42, 60, 51, 255) : cui__rgba(207, 223, 199, 255);
     cui_color roads = dark ? cui__rgba(137, 145, 145, 255) : cui__rgba(255, 255, 255, 255);
+    cui_draw_rect(ui, r, CUI_CORNERS(0), land);
+    if (!t) return;
+    cui_push_clip(ui, r);
+    for (int pass = 1; pass <= 3; pass++) for (int j = 0; j < t->nfeatures; j++) {
+        const map_feature *f = &t->features[j];
+        if (pass == 1 && f->kind == 4 && !dragging) map_fill(ui, r, t, f, parks);
+        if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, water);
+        if (pass == 3 && (f->kind == 2 || f->kind == 5)) {
+            bool motorway = !strcmp(f->class_name, "motorway"), trunk = !strcmp(f->class_name, "trunk");
+            bool primary = !strcmp(f->class_name, "primary"), secondary = !strcmp(f->class_name, "secondary");
+            bool major = motorway || trunk || primary || secondary;
+            if (f->kind == 5 && z <= 8) continue;
+            if (f->kind == 2 && ((z <= 6 && !(motorway || trunk)) ||
+                                 (z <= 8 && !(motorway || trunk || primary)) ||
+                                 (z <= 10 && !major) || (dragging && !major))) continue;
+            if (dragging && f->kind == 5) continue;
+            float width = z <= 6 ? 0.75f : z <= 8 ? 0.95f :
+                          motorway ? (z >= 11 ? 2.8f : 1.8f) :
+                          major ? (z >= 11 ? 1.7f : 1.15f) : (z >= 12 ? 0.9f : 0.65f);
+            cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
+            map_road(ui, r, t, f, f->kind == 5 ? water : major ? roads : minor, width);
+        }
+    }
+    cui_pop_clip(ui);
+}
+void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom) {
+    if (ui && tile && zoom >= 0 && zoom <= 20) map_draw_base(ui, tile, rect, zoom, false);
+}
+static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
+    map_paint *m = data;
+    bool dark = ui->mode == CUI_THEME_DARK;
+    cui_color land = dark ? cui__rgba(38, 46, 52, 255) : cui__rgba(232, 233, 224, 255);
     cui_draw_rect(ui, bounds, CUI_CORNERS(0), land);
     int labels = 0; cui_rect used[MAP_LABELS];
     double center_x = map_world_x(m->view.longitude, m->z);
@@ -344,28 +375,11 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_pop_clip(ui);
             continue;
         }
-        cui_push_clip(ui, r);
-        for (int pass = 1; pass <= 3; pass++) for (int j = 0; j < t->nfeatures; j++) {
-            const map_feature *f = &t->features[j];
-            if (pass == 1 && f->kind == 4 && !m->dragging) map_fill(ui, r, t, f, parks);
-            if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, water);
-            if (pass == 3 && (f->kind == 2 || f->kind == 5)) {
-                bool motorway = !strcmp(f->class_name, "motorway"), trunk = !strcmp(f->class_name, "trunk");
-                bool primary = !strcmp(f->class_name, "primary"), secondary = !strcmp(f->class_name, "secondary");
-                bool major = motorway || trunk || primary || secondary;
-                if (f->kind == 5 && m->z <= 8) continue;
-                if (f->kind == 2 && ((m->z <= 6 && !(motorway || trunk)) ||
-                                     (m->z <= 8 && !(motorway || trunk || primary)) ||
-                                     (m->z <= 10 && !major) || (m->dragging && !major))) continue;
-                if (m->dragging && f->kind == 5) continue;
-                float width = m->z <= 6 ? 0.75f : m->z <= 8 ? 0.95f :
-                              motorway ? (m->z >= 11 ? 2.8f : 1.8f) :
-                              major ? (m->z >= 11 ? 1.7f : 1.15f) : (m->z >= 12 ? 0.9f : 0.65f);
-                cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
-                map_road(ui, r, t, f, f->kind == 5 ? water : major ? roads : minor, width);
-            }
-        }
-        cui_pop_clip(ui);
+        if (m->refs[i].image) {
+            cui_push_clip(ui, r);
+            cui_draw_image(ui, m->refs[i].image, r, (cui_rect){0, 0, 1, 1}, CUI_CORNERS(0), cui__rgba(255, 255, 255, 255));
+            cui_pop_clip(ui);
+        } else map_draw_base(ui, t, r, m->z, m->dragging);
     }
     for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
@@ -485,7 +499,8 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
                 int tx = (x % tiles + tiles) % tiles;
                 const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
                 if (!tile) { if (opts->request) opts->request(opts->tile_user, z, tx, y); }
-                m->refs[m->count++] = (map_ref){tile, (float)(x * 256.0 - cx + r.rect.w / 2), (float)(y * 256.0 - cy + r.rect.h / 2)};
+                cui_texture image = tile && opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
+                m->refs[m->count++] = (map_ref){tile, image, (float)(x * 256.0 - cx + r.rect.w / 2), (float)(y * 256.0 - cy + r.rect.h / 2)};
             }
         }
     }

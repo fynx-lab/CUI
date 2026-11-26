@@ -5,6 +5,7 @@
 #include <winhttp.h>
 #include <cui/cui.h>
 #include <cui/cui_app.h>
+#include <cui/cui_render.h>
 #include "map_tilejson.hpp"
 #include "map_demo_jobs.hpp"
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #define QUEUE 64
 #define RESULT_QUEUE 8
 #define CACHE_BUDGET (96u * 1024u * 1024u)
+#define RASTER_BUDGET (48u * 1024u * 1024u)
 #define WORKERS 4
 #define BODY_CAP (2 * 1024 * 1024)
 typedef map_demo_slot slot;
@@ -27,6 +29,9 @@ typedef struct {
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[RESULT_QUEUE]; int rhead, rtail, rcount;
     slot tiles[SLOTS]; unsigned frame; size_t cache_bytes;
+    cui_ctx *ui, *raster_ui; cui_sw_renderer *raster_sw;
+    unsigned char *raster_pixels; size_t raster_capacity, raster_bytes, raster_tile_bytes;
+    float raster_scale;
     char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
     int pending, loaded; unsigned long long hits, misses; DWORD last_status; uint64_t next_token;
     cui_map_view view;
@@ -170,7 +175,84 @@ static bool template_from_json(demo *d, const char *json) {
 }
 /* Only the UI thread mutates cache entries; returned lookup pointers remain
  * owned through the end of their frame. */
+static void install_local_cjk_fallback(cui_ctx *ui) {
+    wchar_t windows[MAX_PATH];
+    UINT n = GetWindowsDirectoryW(windows, MAX_PATH);
+    if (!n || n >= MAX_PATH - 24) return;
+    const wchar_t *fonts[] = { L"\\Fonts\\msyh.ttc", L"\\Fonts\\simhei.ttf" };
+    for (int i = 0; i < 2; i++) {
+        wchar_t path[MAX_PATH];
+        wcscpy_s(path, MAX_PATH, windows);
+        wcscat_s(path, MAX_PATH, fonts[i]);
+        char utf8[MAX_PATH * 4];
+        if (!WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof utf8, NULL, NULL)) continue;
+        cui_font font = cui_font_load_file(ui, utf8);
+        if (font >= 0) { cui_font_add_fallback(ui, CUI_FONT_BODY, font); break; }
+    }
+}
+static void raster_drop(demo *d, slot *s) {
+    if (!s->raster) return;
+    cui_image_destroy(d->ui, s->raster);
+    d->raster_bytes -= d->raster_tile_bytes;
+    s->raster = 0; s->raster_used = 0;
+}
+/* Only called between frames: textures returned to the map remain alive until
+ * cui_end_frame, even when cache pressure or a tile replacement follows. */
+static void raster_invalidate(demo *d) {
+    for (int i = 0; i < SLOTS; i++) raster_drop(d, &d->tiles[i]);
+}
+static cui_texture raster_lookup(void *user, int z, int x, int y) {
+    demo *d = static_cast<demo *>(user);
+    for (int i = 0; i < SLOTS; i++) {
+        slot *s = &d->tiles[i];
+        if (s->raster && s->state == 2 && s->z == z && s->x == x && s->y == y) {
+            s->raster_used = d->frame; return s->raster;
+        }
+    }
+    return 0;
+}
+static bool raster_prepare(demo *d) {
+    if (!d->raster_ui || !d->raster_sw) return false;
+    float scale = cui_dpi_scale(d->ui);
+    if (scale <= 0 || scale > 4) return false;
+    int pixels = (int)(256 * scale + 0.5f);
+    size_t bytes = (size_t)pixels * pixels * 4;
+    if (bytes > RASTER_BUDGET) return false;
+    if (d->raster_scale != scale) {
+        raster_invalidate(d); d->raster_scale = scale;
+        d->raster_tile_bytes = bytes;
+        cui_set_viewport(d->raster_ui, 256, 256, scale);
+    }
+    int selected = -1;
+    for (int i = 0; i < SLOTS; i++) {
+        slot *s = &d->tiles[i];
+        if (s->state == 2 && s->tile && !s->raster && s->used == d->frame - 1) {
+            selected = i; break;
+        }
+    }
+    if (selected < 0) return false;
+    while (d->raster_bytes > RASTER_BUDGET - bytes) {
+        int victim = map_demo_raster_victim(d->tiles, SLOTS, d->frame - 1);
+        if (victim < 0) return false; /* keep visible tiles rather than thrash */
+        raster_drop(d, &d->tiles[victim]);
+    }
+    if (d->raster_capacity < bytes) {
+        void *next = realloc(d->raster_pixels, bytes);
+        if (!next) return false;
+        d->raster_pixels = static_cast<unsigned char *>(next); d->raster_capacity = bytes;
+    }
+    slot *s = &d->tiles[selected];
+    cui_begin_frame(d->raster_ui, 1.f / 60);
+    cui_map_tile_draw_base(d->raster_ui, s->tile, cui_rect{0, 0, 256, 256}, s->z);
+    cui_end_frame(d->raster_ui);
+    cui_sw_render(d->raster_sw, cui_get_draw_data(d->raster_ui), d->raster_pixels,
+                  pixels, pixels, pixels * 4, CUI_SW_RGBA);
+    s->raster = cui_image_create(d->ui, pixels, pixels, d->raster_pixels);
+    if (s->raster) { s->raster_used = d->frame; d->raster_bytes += bytes; }
+    return s->raster != 0;
+}
 static void cache_drop(demo *d, slot *s) {
+    raster_drop(d, s);
     if (s->state == 3 && d->failures > 0) d->failures--;
     if (s->tile) {
         size_t bytes = cui_mvt_tile_memory_usage(s->tile);
@@ -275,7 +357,12 @@ static void stop(demo *d) {
     WaitForMultipleObjects(WORKERS, d->threads, TRUE, INFINITE);
     for (int i = 0; i < WORKERS; i++) CloseHandle(d->threads[i]);
     CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock);
-    for (int i = 0; i < SLOTS; i++) cui_mvt_tile_destroy(d->tiles[i].tile);
+    for (int i = 0; i < SLOTS; i++) {
+        raster_drop(d, &d->tiles[i]);
+        cui_mvt_tile_destroy(d->tiles[i].tile);
+    }
+    free(d->raster_pixels);
+    cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
     while (d->rcount) {
         result *r = &d->results[d->rhead]; free(r->json); cui_mvt_tile_destroy(r->tile);
         d->rhead = (d->rhead + 1) % RESULT_QUEUE; d->rcount--;
@@ -285,6 +372,7 @@ int main(void) {
     demo *d = static_cast<demo *>(calloc(1, sizeof *d));
     if (!d) return 1;
     d->view = cui_map_view{52.52, 13.405, 8}; d->selected = -1;
+    if (getenv("CUI_MAP_DEMO_BEIJING")) d->view = cui_map_view{39.9, 116.4, 7};
     InitializeCriticalSection(&d->lock);
     d->available = CreateEventW(NULL, TRUE, FALSE, NULL);
     d->stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -298,9 +386,19 @@ int main(void) {
      * dwarf the decoded-tile cache. Keep this example's memory predictable;
      * CUI's renderer default and map widget are unchanged. */
     desc.renderer = getenv("CUI_MAP_DEMO_GL") ? CUI_RENDERER_AUTO : CUI_RENDERER_SOFTWARE;
-    desc.continuous = getenv("CUI_SCREENSHOT") != NULL;
+    desc.continuous = getenv("CUI_SCREENSHOT") != NULL || getenv("CUI_MAP_DEMO_BENCH") != NULL;
     cui_app *app = d->available && d->stop_event ? cui_app_create(&desc) : NULL;
     if (!app) { if (d->available) CloseHandle(d->available); if (d->stop_event) CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock); free(d); return 1; }
+    d->ui = cui_app_ui(app);
+    install_local_cjk_fallback(d->ui);
+    cui_ctx_desc raster_desc = {};
+    raster_desc.theme = CUI_THEME_DARK; raster_desc.no_default_fonts = true;
+    d->raster_ui = cui_create(&raster_desc);
+    d->raster_sw = cui_sw_create();
+    if (!d->raster_ui || !d->raster_sw) {
+        cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
+        d->raster_ui = NULL; d->raster_sw = NULL;
+    }
     d->window = (HWND)cui_app_native_window(app);
     int started = 0;
     for (; started < WORKERS; started++) {
@@ -319,9 +417,36 @@ int main(void) {
     if (getenv("CUI_MAP_DEMO_OFFLINE")) d->tilejson = -1; /* deterministic failure-state smoke test */
     else queue_job(d, first);
     const cui_map_marker markers[] = {{0, 52.52, 13.405, "Berlin"}, {1, 48.8566, 2.3522, "Paris"}};
-    while (cui_app_frame(app)) {
+    LARGE_INTEGER perf_freq = {}, perf_begin = {}, perf_end = {};
+    QueryPerformanceFrequency(&perf_freq);
+    double drag_ms = 0, drag_peak_ms = 0;
+    unsigned long long drag_vertices = 0;
+    int drag_samples = 0;
+    for (;;) {
+        if (getenv("CUI_MAP_DEMO_BENCH")) QueryPerformanceCounter(&perf_begin);
+        if (!cui_app_frame(app)) break;
+        if (getenv("CUI_MAP_DEMO_BENCH")) {
+            QueryPerformanceCounter(&perf_end);
+            if (d->frame >= 650 && d->frame < 750) {
+                double ms = (double)(perf_end.QuadPart - perf_begin.QuadPart) * 1000.0 / perf_freq.QuadPart;
+                drag_ms += ms; if (ms > drag_peak_ms) drag_peak_ms = ms;
+                drag_vertices += (unsigned)cui_get_draw_data(d->ui)->vertex_count;
+                drag_samples++;
+            } else if (d->frame == 750 && drag_samples) {
+                fprintf(stderr, "map drag probe: frames=%d app_frame_avg=%.2fms max=%.2fms vertices_avg=%llu raster=%.1fMiB\n",
+                        drag_samples, drag_ms / drag_samples, drag_peak_ms,
+                        drag_vertices / (unsigned long long)drag_samples,
+                        (double)d->raster_bytes / (1024 * 1024));
+            }
+        }
         cui_ctx *ui = cui_app_ui(app);
+        if (getenv("CUI_MAP_DEMO_BENCH") && d->frame >= 649 && d->frame < 750) {
+            cui_input_mouse_move(ui, 500 + ((int)(d->frame - 649) % 50), 300);
+            if (d->frame == 649) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
+            if (d->frame == 749) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+        }
         pump(d); d->frame++;
+        bool baked = !getenv("CUI_MAP_DEMO_DISABLE_RASTER") && raster_prepare(d);
         cui_box root = {}, header = {}, footer = {};
         root.width = CUI_FILL; root.height = CUI_FILL;
         header.pad = 12; header.gap = 16; header.width = CUI_FILL;
@@ -350,10 +475,19 @@ int main(void) {
         } else cui_secondary(ui, "Drag to pan  ·  Wheel to zoom  ·  Arrow keys to move");
         cui_box_end(ui);
         cui_map_opts options = {};
-        options.lookup = tile_lookup; options.request = tile_request; options.tile_user = d;
+        options.lookup = tile_lookup;
+        if (!getenv("CUI_MAP_DEMO_DISABLE_RASTER")) options.raster_lookup = raster_lookup;
+        options.request = tile_request; options.tile_user = d;
         options.markers = markers; options.marker_count = 2;
         options.min_zoom = d->min_zoom; options.max_zoom = d->max_zoom ? d->max_zoom : 14;
         cui_map_result hit = cui_map_ex(ui, "online-map", &d->view, &options);
+        if (baked) for (int i = 0; i < SLOTS; i++) {
+            slot *s = &d->tiles[i];
+            if (s->state == 2 && s->used == d->frame && !s->raster &&
+                d->raster_bytes <= RASTER_BUDGET - d->raster_tile_bytes) {
+                cui_request_redraw(ui); break;
+            }
+        }
         EnterCriticalSection(&d->lock);
         map_demo_cancel_stale(d->tiles, SLOTS, d->jobs, QUEUE, d->jhead, d->jtail, d->jcount, d->frame);
         if (!d->jcount) ResetEvent(d->available);
@@ -366,8 +500,9 @@ int main(void) {
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
         cui_column_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
-        cui_textf(ui, "z%d · Cache %.1f/96 MiB · H%llu/M%llu",
-                  (int)d->view.zoom, (double)d->cache_bytes / (1024 * 1024), d->hits, d->misses);
+        cui_textf(ui, "z%d · Cache %.1f/96 MiB · Raster %.1f/48 MiB · H%llu/M%llu",
+                  (int)d->view.zoom, (double)d->cache_bytes / (1024 * 1024),
+                  (double)d->raster_bytes / (1024 * 1024), d->hits, d->misses);
         bool shown_failure = false;
         for (int i = 0; i < SLOTS; i++) {
             slot *s = &d->tiles[i];

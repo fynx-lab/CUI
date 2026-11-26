@@ -5146,9 +5146,15 @@ CUI_API cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size);
 /* Approximate owned heap bytes, including reserved geometry capacities; NULL is zero. */
 CUI_API size_t cui_mvt_tile_memory_usage(const cui_mvt_tile *tile);
 CUI_API void cui_mvt_tile_destroy(cui_mvt_tile *tile);
+/* Draw only the decoded tile's base geometry at logical 256x256 size (no
+ * labels or markers); useful for a host-managed offscreen raster cache. */
+CUI_API void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom);
 typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_view;
 typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;
 typedef const cui_mvt_tile *(*cui_map_tile_lookup)(void *user, int z, int x, int y);
+/* Optional texture for the base geometry of a decoded 256x256 tile. The
+ * caller keeps it alive through cui_end_frame. Return 0 for vector fallback. */
+typedef cui_texture (*cui_map_tile_raster_lookup)(void *user, int z, int x, int y);
 typedef void (*cui_map_tile_request)(void *user, int z, int x, int y);
 typedef struct cui_map_opts {
     int _;
@@ -5159,6 +5165,7 @@ typedef struct cui_map_opts {
     const cui_map_marker *markers;
     int marker_count;
     int min_zoom, max_zoom;             /* zero defaults: 0..14 */
+    cui_map_tile_raster_lookup raster_lookup; /* optional cached base image */
 } cui_map_opts;
 typedef struct cui_map_result {
     bool view_changed;

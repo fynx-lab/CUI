@@ -10,6 +10,8 @@ struct map_demo_slot {
     cui_mvt_tile *tile;
     uint64_t token;
     unsigned next_retry_tick, status, retry_count;
+    cui_texture raster;
+    unsigned raster_used;
 };
 struct map_demo_job {
     int z, x, y;
@@ -31,4 +33,7 @@ bool map_demo_tile_retryable(unsigned status);
 unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_after_ms);
 void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_after_ms, unsigned now);
 bool map_demo_retry_due(const map_demo_slot &slot, unsigned now);
+/* Choose the oldest raster unused in the previous frame. Returns -1 if all
+ * textures could still be referenced by that frame or none exist. */
+int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previous_frame);
 #endif

@@ -41,6 +41,26 @@ static int bench_drag(const char *path) {
     return drag < still / 2 ? 0 : 1;
 }
 
+static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
+    (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
+}
+static int road_vertices(int zoom, const char *road_class) {
+    map_fixture_buf raw = map_fixture_road(road_class);
+    cui_mvt_tile *tile = cui_mvt_tile_decode(raw.b, raw.n);
+    if (!tile) return -1;
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_DARK});
+    if (!ui) { cui_mvt_tile_destroy(tile); return -1; }
+    cui_set_viewport(ui, 256, 256, 1);
+    cui_map_view view = {0, 0, (float)zoom};
+    for (int i = 0; i < 2; i++) {
+        cui_begin_frame(ui, 1.f/60);
+        cui_map(ui, "road", &view, .lookup = road_lookup, .tile_user = tile);
+        cui_end_frame(ui);
+    }
+    int vertices = cui_get_draw_data(ui)->vertex_count;
+    cui_destroy(ui); cui_mvt_tile_destroy(tile);
+    return vertices;
+}
 static const cui_mvt_tile *lookup(void *user, int z, int x, int y) {
     scene *s = user; return z == 0 && x == 0 && y == 0 ? s->tile : NULL;
 }
@@ -152,6 +172,10 @@ int main(int argc, char **argv) {
         }
         cui_mvt_tile_destroy(park);
     }
+    CHECK(road_vertices(6, "motorway") > road_vertices(6, "primary"));
+    CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
+    CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));
+    CHECK(road_vertices(11, "residential") > road_vertices(10, "residential"));
     fprintf(stderr, "map tests: %s\n", failures ? "FAILED" : "OK");
     return failures ? 1 : 0;
 }

@@ -57,6 +57,8 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- The Windows map demo shows current zoom and the coordinates/reason for a visible failed tile. Transient network/429/5xx tile failures receive up to two spaced, visibility-gated retries after worker attempts are exhausted; permanent failures stay behind the explicit Retry action.
+- Low-zoom maps now draw a thinner, zoom-dependent subset of major roads (motorway/trunk at z0–6, plus primary at z7–8, secondary at z9–10); waterway lines are suppressed through z8.
 - Map dragging temporarily omits minor roads, landcover and waterways during movement, restoring full detail on mouse release; this avoids rebuilding dense geometry for every pointer update without changing requests or the normal view.
 - The Windows-only native map example validates OpenFreeMap TileJSON with the MIT-licensed json11 parser, rejecting malformed zoom bounds and tile URLs; the C99 core has no new JSON dependency. See [Native vector map](docs/map.md).
 - The Windows map demo now defaults to software rendering to avoid a measured >700 MiB OpenGL driver/staging peak in a dense Berlin z8 view; `CUI_MAP_DEMO_GL=1` restores normal renderer selection for comparison. This does not change CUI's renderer default.

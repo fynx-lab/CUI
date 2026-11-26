@@ -347,12 +347,17 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             if (pass == 1 && f->kind == 4 && !m->dragging) map_fill(ui, r, t, f, parks);
             if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, water);
             if (pass == 3 && (f->kind == 2 || f->kind == 5)) {
-                bool major = !strcmp(f->class_name, "motorway") || !strcmp(f->class_name, "trunk") ||
-                             !strcmp(f->class_name, "primary") || !strcmp(f->class_name, "secondary");
-                if (f->kind == 2 && ((m->z < 9 && !major) || (m->dragging && !major))) continue;
+                bool motorway = !strcmp(f->class_name, "motorway"), trunk = !strcmp(f->class_name, "trunk");
+                bool primary = !strcmp(f->class_name, "primary"), secondary = !strcmp(f->class_name, "secondary");
+                bool major = motorway || trunk || primary || secondary;
+                if (f->kind == 5 && m->z <= 8) continue;
+                if (f->kind == 2 && ((m->z <= 6 && !(motorway || trunk)) ||
+                                     (m->z <= 8 && !(motorway || trunk || primary)) ||
+                                     (m->z <= 10 && !major) || (m->dragging && !major))) continue;
                 if (m->dragging && f->kind == 5) continue;
-                float width = !strcmp(f->class_name, "motorway") ? (m->z >= 11 ? 2.8f : 2.3f) :
-                              major ? (m->z >= 11 ? 1.7f : 1.3f) : (m->z >= 12 ? 0.9f : 0.65f);
+                float width = m->z <= 6 ? 0.75f : m->z <= 8 ? 0.95f :
+                              motorway ? (m->z >= 11 ? 2.8f : 1.8f) :
+                              major ? (m->z >= 11 ? 1.7f : 1.15f) : (m->z >= 12 ? 0.9f : 0.65f);
                 cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
                 map_road(ui, r, t, f, f->kind == 5 ? water : major ? roads : minor, width);
             }

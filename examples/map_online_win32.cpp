@@ -19,7 +19,7 @@
 #define BODY_CAP (2 * 1024 * 1024)
 typedef map_demo_slot slot;
 typedef map_demo_job job;
-typedef struct { int z, x, y, ok; DWORD status; uint64_t token; char *json; cui_mvt_tile *tile; } result;
+typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_t token; char *json; cui_mvt_tile *tile; } result;
 typedef struct {
     CRITICAL_SECTION lock;
     HANDLE available, stop_event, threads[WORKERS];
@@ -125,13 +125,17 @@ static DWORD WINAPI worker(void *arg) {
         DWORD status = 0; unsigned retry_after_ms = 0;
         int n = -1;
         for (int attempt = 1; attempt <= 3; attempt++) {
-            n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
+            /* Deterministic transport-failure smoke test; no tile HTTP in this mode. */
+            const char *fault = j.z >= 0 ? getenv("CUI_MAP_DEMO_TILE_FAULT") : NULL;
+            if (fault && (!strcmp(fault, "404") || !strcmp(fault, "503") || !strcmp(fault, "0"))) {
+                n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
+            } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
             if (n > 0 || status == 200 || (status && status != 429 && status != 503 && status < 500) || attempt == 3) break;
             unsigned delay = map_demo_retry_delay_ms(attempt, retry_after_ms,
                                                       GetTickCount() ^ (unsigned)j.token);
             if (WaitForSingleObject(d->stop_event, delay) != WAIT_TIMEOUT) break;
         }
-        result r = {j.z, j.x, j.y, n > 0, status, j.token, NULL, NULL};
+        result r = {j.z, j.x, j.y, n > 0, status, retry_after_ms, j.token, NULL, NULL};
         if (j.z < 0) r.json = bytes;
         else { if (n > 0) r.tile = cui_mvt_tile_decode(bytes, (size_t)n); r.ok = r.tile != NULL; free(bytes); }
         /* A slow UI frame can finish more than 68 jobs before it drains the
@@ -167,6 +171,7 @@ static bool template_from_json(demo *d, const char *json) {
 /* Only the UI thread mutates cache entries; returned lookup pointers remain
  * owned through the end of their frame. */
 static void cache_drop(demo *d, slot *s) {
+    if (s->state == 3 && d->failures > 0) d->failures--;
     if (s->tile) {
         size_t bytes = cui_mvt_tile_memory_usage(s->tile);
         d->cache_bytes -= bytes;
@@ -212,7 +217,8 @@ static void pump(demo *d) {
                 } else {
                     if (r->ok) d->last_status = 507;
                     else d->last_status = r->status;
-                    cui_mvt_tile_destroy(r->tile); s->state = 3; d->failures++;
+                    cui_mvt_tile_destroy(r->tile); d->failures++;
+                    map_demo_note_failure(*s, d->last_status, r->retry_after_ms, GetTickCount());
                 }
             } else cui_mvt_tile_destroy(r->tile);
         }
@@ -233,9 +239,11 @@ static const cui_mvt_tile *tile_lookup(void *user, int z, int x, int y) {
 }
 static void tile_request(void *user, int z, int x, int y) {
     demo *d = static_cast<demo *>(user);
-    if (d->tilejson != 1 || find(d, z, x, y)) return;
-    int index = -1; unsigned oldest = ~0u;
-    for (int i = 0; i < SLOTS; i++) {
+    slot *existing = find(d, z, x, y);
+    bool retry = existing && map_demo_retry_due(*existing, GetTickCount());
+    if (d->tilejson != 1 || (existing && !retry)) return;
+    int index = existing ? (int)(existing - d->tiles) : -1; unsigned oldest = ~0u;
+    if (index < 0) for (int i = 0; i < SLOTS; i++) {
         slot *s = &d->tiles[i];
         if (!s->state) { index = i; break; }
         if (s->state != 1 && s->used != d->frame && s->used < oldest) { oldest = s->used; index = i; }
@@ -252,9 +260,11 @@ static void tile_request(void *user, int z, int x, int y) {
     bool space = d->jcount < QUEUE && !d->stopping;
     LeaveCriticalSection(&d->lock);
     if (!space) return;
+    unsigned retry_count = retry ? s->retry_count + 1 : 0;
     cache_drop(d, s);
     d->next_token++;
     *s = slot{z, x, y, 1, d->frame, NULL, d->next_token};
+    s->retry_count = retry_count;
     job j = {z, x, y, "", d->next_token}; memcpy(j.path, path, (size_t)n + 1);
     if (!queue_job(d, j)) { *s = slot{}; return; }
 }
@@ -318,7 +328,7 @@ int main(void) {
         footer.pad = 10; footer.gap = 4; footer.width = CUI_FILL;
         cui_column_begin(ui, &root);
         cui_row_begin(ui, &header);
-        cui_heading(ui, "Vector map", 3);
+        cui_heading(ui, "Map", 3);
         if (d->tilejson == 0) cui_secondary(ui, "Connecting to OpenFreeMap...");
         else if (d->tilejson < 0) {
             cui_secondary(ui, (d->last_status == 429 || d->last_status == 503) ? "OpenFreeMap is throttling requests." :
@@ -329,7 +339,8 @@ int main(void) {
             cui_textf(ui, "%d tiles unavailable%s", d->failures,
                       (d->last_status == 429 || d->last_status == 503) ? " (throttled)" :
                       d->last_status == 507 ? " (cache full)" :
-                      d->last_status == 200 ? " (invalid tile)" : " (network error)");
+                      d->last_status == 200 ? " (invalid tile)" :
+                      d->last_status >= 400 ? " (HTTP error)" : " (network error)");
             if (cui_button_ex(ui, "Retry", nullptr)) {
                 for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
                 d->failures = 0;
@@ -355,8 +366,24 @@ int main(void) {
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
         cui_column_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
-        cui_textf(ui, "Cache %.1f/96 MiB · H%llu/M%llu",
-                  (double)d->cache_bytes / (1024 * 1024), d->hits, d->misses);
+        cui_textf(ui, "z%d · Cache %.1f/96 MiB · H%llu/M%llu",
+                  (int)d->view.zoom, (double)d->cache_bytes / (1024 * 1024), d->hits, d->misses);
+        bool shown_failure = false;
+        for (int i = 0; i < SLOTS; i++) {
+            slot *s = &d->tiles[i];
+            if (s->state != 3 || s->used != d->frame) continue;
+            if (!shown_failure) {
+                if (s->status == 200) cui_textf(ui, "Tile z%d/%d/%d: invalid PBF", s->z, s->x, s->y);
+                else if (s->status == 507) cui_textf(ui, "Tile z%d/%d/%d: cache full", s->z, s->x, s->y);
+                else if (s->status) cui_textf(ui, "Tile z%d/%d/%d: HTTP %u", s->z, s->x, s->y, s->status);
+                else cui_textf(ui, "Tile z%d/%d/%d: network error", s->z, s->x, s->y);
+                shown_failure = true;
+            }
+            if (s->next_retry_tick && s->retry_count < 2) {
+                int32_t wait_ms = (int32_t)(s->next_retry_tick - GetTickCount());
+                if (wait_ms > 0) cui_request_wakeup(ui, (float)wait_ms / 1000.f);
+            }
+        }
         if (d->selected >= 0) cui_textf(ui, "Marker: %s", markers[d->selected].label);
         cui_box_end(ui);
         cui_box_end(ui);

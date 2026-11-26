@@ -1,5 +1,29 @@
 #include "map_demo_jobs.hpp"
 
+bool map_demo_tile_retryable(unsigned status) {
+    return status == 0 || status == 429 || status == 503 ||
+           (status >= 500 && status < 600 && status != 507);
+}
+
+unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_after_ms) {
+    if (retry_count >= 2) return 0;
+    unsigned delay = retry_count == 0 ? 15000 : 45000;
+    return retry_after_ms > delay ? retry_after_ms : delay;
+}
+
+void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_after_ms, unsigned now) {
+    slot.state = 3;
+    slot.status = status;
+    unsigned delay = map_demo_tile_retryable(status) ?
+        map_demo_visible_retry_delay_ms(slot.retry_count, retry_after_ms) : 0;
+    slot.next_retry_tick = delay ? now + delay : 0;
+}
+
+bool map_demo_retry_due(const map_demo_slot &slot, unsigned now) {
+    return slot.state == 3 && slot.next_retry_tick && slot.retry_count < 2 &&
+           (int32_t)(now - slot.next_retry_tick) >= 0;
+}
+
 unsigned map_demo_retry_delay_ms(int attempt, unsigned retry_after_ms, unsigned jitter_ms) {
     if (attempt < 1 || attempt >= 3) return 0;
     if (retry_after_ms) return retry_after_ms > 30000 ? 30000 : retry_after_ms;

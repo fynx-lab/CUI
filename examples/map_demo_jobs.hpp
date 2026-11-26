@@ -9,6 +9,7 @@ struct map_demo_slot {
     unsigned used;
     cui_mvt_tile *tile;
     uint64_t token;
+    unsigned next_retry_tick, status, retry_count;
 };
 struct map_demo_job {
     int z, x, y;
@@ -24,4 +25,10 @@ int map_demo_cancel_stale(map_demo_slot *slots, int slot_count,
                           int &count, unsigned frame);
 bool map_demo_result_matches(const map_demo_slot &slot, const map_demo_job &job);
 unsigned map_demo_retry_delay_ms(int attempt, unsigned retry_after_ms, unsigned jitter_ms);
+/* After the worker's three attempts, retry a still-visible tile at most twice.
+ * HTTP 200 with a failed decode is permanent; 507 is the demo's cache limit. */
+bool map_demo_tile_retryable(unsigned status);
+unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_after_ms);
+void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_after_ms, unsigned now);
+bool map_demo_retry_due(const map_demo_slot &slot, unsigned now);
 #endif

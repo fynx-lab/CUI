@@ -263,17 +263,16 @@ static void cache_drop(demo *d, slot *s) {
     }
     *s = slot{};
 }
-static bool cache_make_room(demo *d, size_t bytes) {
+static bool cache_make_room(demo *d, size_t bytes, int target_zoom) {
     if (bytes > CACHE_BUDGET) return false;
+    /* pump runs after cui_app_frame has presented the preceding draw data and
+     * before building the next map: last frame's lookup pointers are no longer
+     * in use. Pinning used == d->frame here made a near-full cache reject
+     * completed downloads as permanent errors during pan/zoom. */
     while (d->cache_bytes > CACHE_BUDGET - bytes) {
-        slot *old = NULL;
-        for (int k = 0; k < SLOTS; k++) {
-            slot *candidate = &d->tiles[k];
-            if (candidate->tile && candidate->used != d->frame &&
-                (!old || candidate->used < old->used)) old = candidate;
-        }
-        if (!old) return false;
-        cache_drop(d, old);
+        int victim = map_demo_decoded_victim(d->tiles, SLOTS, target_zoom);
+        if (victim < 0) return false;
+        cache_drop(d, &d->tiles[victim]);
     }
     return true;
 }
@@ -296,10 +295,10 @@ static void pump(demo *d) {
             for (int k = 0; k < SLOTS; k++) if (d->tiles[k].state == 1 && d->tiles[k].z == r->z && d->tiles[k].x == r->x && d->tiles[k].y == r->y) { s = &d->tiles[k]; break; }
             if (s && s->token == r->token && s->z == r->z && s->x == r->x && s->y == r->y) {
                 size_t bytes = cui_mvt_tile_memory_usage(r->tile);
-                if (r->ok && cache_make_room(d, bytes)) {
+                if (r->ok && cache_make_room(d, bytes, r->z)) {
                     s->tile = r->tile; d->cache_bytes += bytes; s->state = 2;
                 } else {
-                    if (r->ok) d->last_status = 507;
+                    if (r->ok) d->last_status = bytes > CACHE_BUDGET ? 508 : 507;
                     else d->last_status = r->status;
                     cui_mvt_tile_destroy(r->tile); d->failures++;
                     map_demo_note_failure(*s, d->last_status, r->retry_after_ms, GetTickCount());
@@ -344,7 +343,7 @@ static void tile_request(void *user, int z, int x, int y) {
     bool space = d->jcount < QUEUE && !d->stopping;
     LeaveCriticalSection(&d->lock);
     if (!space) return;
-    unsigned retry_count = retry ? s->retry_count + 1 : 0;
+    unsigned retry_count = retry ? s->retry_count + (s->status != 507) : 0;
     cache_drop(d, s);
     d->next_token++;
     *s = slot{z, x, y, 1, d->frame, NULL, d->next_token};
@@ -470,7 +469,8 @@ int main(void) {
         } else if (d->failures) {
             cui_textf(ui, "%d tiles unavailable%s", d->failures,
                       (d->last_status == 429 || d->last_status == 503) ? " (throttled)" :
-                      d->last_status == 507 ? " (cache full)" :
+                      d->last_status == 507 ? " (cache busy; retrying)" :
+                      d->last_status == 508 ? " (tile exceeds cache budget)" :
                       d->last_status == 200 ? " (invalid tile)" :
                       d->last_status >= 400 ? " (HTTP error)" : " (network error)");
             if (cui_button_ex(ui, "Retry", nullptr)) {
@@ -516,12 +516,13 @@ int main(void) {
             if (s->state != 3 || s->used != d->frame) continue;
             if (!shown_failure) {
                 if (s->status == 200) cui_textf(ui, "Tile z%d/%d/%d: invalid PBF", s->z, s->x, s->y);
-                else if (s->status == 507) cui_textf(ui, "Tile z%d/%d/%d: cache full", s->z, s->x, s->y);
+                else if (s->status == 507) cui_textf(ui, "Tile z%d/%d/%d: cache busy; retrying", s->z, s->x, s->y);
+                else if (s->status == 508) cui_textf(ui, "Tile z%d/%d/%d: exceeds cache budget", s->z, s->x, s->y);
                 else if (s->status) cui_textf(ui, "Tile z%d/%d/%d: HTTP %u", s->z, s->x, s->y, s->status);
                 else cui_textf(ui, "Tile z%d/%d/%d: network error", s->z, s->x, s->y);
                 shown_failure = true;
             }
-            if (s->next_retry_tick && s->retry_count < 2) {
+            if (s->next_retry_tick && (s->retry_count < 2 || s->status == 507)) {
                 int32_t wait_ms = (int32_t)(s->next_retry_tick - GetTickCount());
                 if (wait_ms > 0) cui_request_wakeup(ui, (float)wait_ms / 1000.f);
             }

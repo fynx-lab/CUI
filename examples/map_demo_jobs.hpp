@@ -27,8 +27,9 @@ int map_demo_cancel_stale(map_demo_slot *slots, int slot_count,
                           int &count, unsigned frame);
 bool map_demo_result_matches(const map_demo_slot &slot, const map_demo_job &job);
 unsigned map_demo_retry_delay_ms(int attempt, unsigned retry_after_ms, unsigned jitter_ms);
-/* After the worker's three attempts, retry a still-visible tile at most twice.
- * HTTP 200 with a failed decode is permanent; 507 is the demo's cache limit. */
+/* After the worker's three attempts, retry a still-visible transport failure at
+ * most twice. Invalid PBF and an oversized decoded tile are permanent. A
+ * temporary 507 cache-admission failure retries while the tile stays visible. */
 bool map_demo_tile_retryable(unsigned status);
 unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_after_ms);
 void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_after_ms, unsigned now);
@@ -36,4 +37,7 @@ bool map_demo_retry_due(const map_demo_slot &slot, unsigned now);
 /* Choose the oldest raster unused in the previous frame. Returns -1 if all
  * textures could still be referenced by that frame or none exist. */
 int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previous_frame);
+/* Called after the previous frame has been presented, before constructing the
+ * next one. Prefer tiles from other zoom levels, then the oldest target tile. */
+int map_demo_decoded_victim(const map_demo_slot *slots, int count, int target_zoom);
 #endif

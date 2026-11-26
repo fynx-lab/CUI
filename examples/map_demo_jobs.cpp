@@ -14,13 +14,14 @@ unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_af
 void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_after_ms, unsigned now) {
     slot.state = 3;
     slot.status = status;
-    unsigned delay = map_demo_tile_retryable(status) ?
+    unsigned delay = status == 507 ? 1000 : map_demo_tile_retryable(status) ?
         map_demo_visible_retry_delay_ms(slot.retry_count, retry_after_ms) : 0;
     slot.next_retry_tick = delay ? now + delay : 0;
 }
 
 bool map_demo_retry_due(const map_demo_slot &slot, unsigned now) {
-    return slot.state == 3 && slot.next_retry_tick && slot.retry_count < 2 &&
+    return slot.state == 3 && slot.next_retry_tick &&
+           (slot.status == 507 || slot.retry_count < 2) &&
            (int32_t)(now - slot.next_retry_tick) >= 0;
 }
 
@@ -29,6 +30,17 @@ int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previ
     for (int i = 0; i < count; i++) {
         if (!slots[i].raster || slots[i].raster_used == previous_frame) continue;
         if (oldest < 0 || slots[i].raster_used < slots[oldest].raster_used) oldest = i;
+    }
+    return oldest;
+}
+
+int map_demo_decoded_victim(const map_demo_slot *slots, int count, int target_zoom) {
+    int oldest = -1;
+    for (int i = 0; i < count; i++) {
+        if (!slots[i].tile) continue;
+        if (oldest < 0 || (slots[i].z != target_zoom && slots[oldest].z == target_zoom) ||
+            ((slots[i].z != target_zoom) == (slots[oldest].z != target_zoom) &&
+             slots[i].used < slots[oldest].used)) oldest = i;
     }
     return oldest;
 }

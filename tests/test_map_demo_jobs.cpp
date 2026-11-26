@@ -54,6 +54,12 @@ int main() {
     CHECK(!map_demo_retry_due(failed, 50000));
     map_demo_note_failure(failed, 0, 0, 0xfffffff0u);
     CHECK(map_demo_retry_due(failed, 0x3a88u)); /* tick wrap at 15000ms */
+    failed.retry_count = 2;
+    map_demo_note_failure(failed, 507, 0, 5000);
+    CHECK(failed.next_retry_tick == 6000 && !map_demo_retry_due(failed, 5999));
+    CHECK(map_demo_retry_due(failed, 6000)); /* capacity is temporary */
+    map_demo_note_failure(failed, 508, 0, 6000);
+    CHECK(!map_demo_retry_due(failed, 99999)); /* tile larger than cache */
     map_demo_slot images[4] = {};
     images[0].raster = 1; images[0].raster_used = 4;
     images[1].raster = 2; images[1].raster_used = 2;
@@ -64,6 +70,22 @@ int main() {
     images[0].raster_used = 6;
     CHECK(map_demo_raster_victim(images, 4, 6) == -1);
     CHECK(map_demo_raster_victim(images, 4, 7) == 0);
+    /* pump runs after the previous frame has been presented: a full cache of
+     * previously visible tiles must still be able to admit the next tile. */
+    map_demo_slot decoded[3] = {};
+    decoded[0].z = 10; decoded[0].tile = reinterpret_cast<cui_mvt_tile *>(1);
+    decoded[0].used = 42;
+    decoded[1].z = 9; decoded[1].tile = reinterpret_cast<cui_mvt_tile *>(1);
+    decoded[1].used = 42;
+    decoded[2].z = 9; decoded[2].tile = reinterpret_cast<cui_mvt_tile *>(1);
+    decoded[2].used = 41;
+    CHECK(map_demo_decoded_victim(decoded, 3, 9) == 0); /* old zoom first */
+    decoded[0].tile = nullptr;
+    CHECK(map_demo_decoded_victim(decoded, 3, 9) == 2); /* then LRU */
+    decoded[2].tile = nullptr;
+    CHECK(map_demo_decoded_victim(decoded, 3, 9) == 1); /* even last frame */
+    decoded[1].tile = nullptr;
+    CHECK(map_demo_decoded_victim(decoded, 3, 9) == -1);
     std::fprintf(stderr, "map demo jobs tests: %s\n", errors ? "FAILED" : "OK");
     return errors ? 1 : 0;
 }

@@ -20,7 +20,7 @@ static void map_fixture_nested(map_fixture_buf *b, unsigned id, const void *data
 static void map_fixture_coord(map_fixture_buf *b, int x) {
     map_fixture_var(b, ((unsigned)x << 1) ^ (unsigned)(x >> 31));
 }
-static map_fixture_buf map_fixture(void) {
+static map_fixture_buf map_fixture_layer(const char *name) {
     map_fixture_buf g = {{0}, 0}, f = {{0}, 0}, layer = {{0}, 0}, tile = {{0}, 0};
     map_fixture_var(&g, 9); map_fixture_coord(&g, 0); map_fixture_coord(&g, 0);
     map_fixture_var(&g, 26); map_fixture_coord(&g, 4096); map_fixture_coord(&g, 0);
@@ -33,10 +33,11 @@ static map_fixture_buf map_fixture(void) {
     map_fixture_coord(&g, 0); map_fixture_coord(&g, -2048);
     map_fixture_var(&g, 15);
     map_fixture_field(&f, 3, 3); map_fixture_nested(&f, 4, g.b, g.n);
-    map_fixture_nested(&layer, 1, "water", 5);
+    map_fixture_nested(&layer, 1, name, strlen(name));
     map_fixture_nested(&layer, 2, f.b, f.n);
     map_fixture_field(&layer, 5, 4096); map_fixture_field(&layer, 15, 2);
     map_fixture_nested(&tile, 3, layer.b, layer.n);
     return tile;
 }
+static map_fixture_buf map_fixture(void) { return map_fixture_layer("water"); }
 #endif

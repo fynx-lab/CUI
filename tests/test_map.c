@@ -9,6 +9,38 @@
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
 typedef struct { cui_mvt_tile *tile; cui_map_view view; int requests; cui_map_result last; } scene;
+static const cui_mvt_tile *bench_lookup(void *user, int z, int x, int y) {
+    return z == 8 && x == 137 && y == 83 ? (const cui_mvt_tile *)user : NULL;
+}
+static void bench_frame(cui_ctx *ui, cui_mvt_tile *tile, cui_map_view *view) {
+    cui_begin_frame(ui, 1.f/60);
+    cui_map(ui, "bench", view, .lookup = bench_lookup, .tile_user = tile);
+    cui_end_frame(ui);
+}
+static int bench_drag(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return 2;
+    unsigned char *data = malloc(2 * 1024 * 1024 + 1);
+    if (!data) { fclose(f); return 2; }
+    size_t n = fread(data, 1, 2 * 1024 * 1024 + 1, f); fclose(f);
+    cui_mvt_tile *tile = cui_mvt_tile_decode(data, n); free(data);
+    if (!tile) return 2;
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme=CUI_THEME_DARK});
+    if (!ui) { cui_mvt_tile_destroy(tile); return 2; }
+    cui_set_viewport(ui, 400, 400, 1);
+    cui_map_view view = {52.52, 13.405, 8};
+    bench_frame(ui, tile, &view); bench_frame(ui, tile, &view);
+    int still = cui_get_draw_data(ui)->vertex_count;
+    cui_input_mouse_move(ui, 200, 200); bench_frame(ui, tile, &view);
+    cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true); bench_frame(ui, tile, &view);
+    cui_input_mouse_move(ui, 225, 200);
+    bench_frame(ui, tile, &view);
+    int drag = cui_get_draw_data(ui)->vertex_count;
+    fprintf(stderr,"drag benchmark still=%d vertices drag=%d vertices longitude=%.6f\n",still,drag,view.longitude);
+    cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false); bench_frame(ui, tile, &view);
+    cui_destroy(ui); cui_mvt_tile_destroy(tile);
+    return drag < still / 2 ? 0 : 1;
+}
+
 static const cui_mvt_tile *lookup(void *user, int z, int x, int y) {
     scene *s = user; return z == 0 && x == 0 && y == 0 ? s->tile : NULL;
 }
@@ -23,6 +55,7 @@ static void frame(cui_ctx *ui, scene *s) {
     cui_end_frame(ui);
 }
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--drag-bench")) return bench_drag(argv[2]);
     if (argc > 1) {
         FILE *file = fopen(argv[1], "rb");
         if (!file) return 2;
@@ -93,6 +126,31 @@ int main(int argc, char **argv) {
             cui_destroy(ui);
         }
         cui_mvt_tile_destroy(t);
+    }
+    /* During a drag, detail is deferred so mouse movement can be painted
+     * promptly; releasing restores full tile geometry. */
+    map_fixture_buf land = map_fixture_layer("landcover");
+    cui_mvt_tile *park = cui_mvt_tile_decode(land.b, land.n);
+    CHECK(park != NULL);
+    if (park) {
+        cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_DARK});
+        CHECK(ui != NULL);
+        if (ui) {
+            scene drag = {park, {0, 0, 0}, 0};
+            cui_set_viewport(ui, 256, 256, 1);
+            frame(ui, &drag); frame(ui, &drag);
+            int still_vertices = cui_get_draw_data(ui)->vertex_count;
+            cui_input_mouse_move(ui, 128, 128); frame(ui, &drag);
+            cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true); frame(ui, &drag);
+            cui_input_mouse_move(ui, 140, 128); frame(ui, &drag);
+            int moving_vertices = cui_get_draw_data(ui)->vertex_count;
+            CHECK(drag.last.view_changed && fabs(drag.view.longitude + 16.875) < 0.001);
+            CHECK(moving_vertices < still_vertices);
+            cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false); frame(ui, &drag);
+            CHECK(cui_get_draw_data(ui)->vertex_count >= still_vertices);
+            cui_destroy(ui);
+        }
+        cui_mvt_tile_destroy(park);
     }
     fprintf(stderr, "map tests: %s\n", failures ? "FAILED" : "OK");
     return failures ? 1 : 0;

@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Map dragging temporarily omits minor roads, landcover and waterways during movement, restoring full detail on mouse release; this avoids rebuilding dense geometry for every pointer update without changing requests or the normal view.
 - The Windows-only native map example validates OpenFreeMap TileJSON with the MIT-licensed json11 parser, rejecting malformed zoom bounds and tile URLs; the C99 core has no new JSON dependency. See [Native vector map](docs/map.md).
 - The Windows map demo now defaults to software rendering to avoid a measured >700 MiB OpenGL driver/staging peak in a dense Berlin z8 view; `CUI_MAP_DEMO_GL=1` restores normal renderer selection for comparison. This does not change CUI's renderer default.
 - The Windows map demo now discards obsolete queued viewport work and late results, retries transient responses with capped backoff and `Retry-After`, and caps its decoded tile cache at 96 MiB/192 entries (with a separate eight-result backpressure queue). The map widget paints lightweight placeholders for missing tiles, reserves marker labels when placing names, and exposes decoded-tile owned-byte accounting.

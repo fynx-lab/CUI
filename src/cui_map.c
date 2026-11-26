@@ -282,7 +282,7 @@ static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
 typedef struct { const cui_mvt_tile *tile; float x, y; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
-    int z, count; map_ref refs[MAP_REFS];
+    int z, count; bool dragging; map_ref refs[MAP_REFS];
 } map_paint;
 static double map_clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
 static double map_world_y(double lat, int z) {
@@ -344,12 +344,13 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         cui_push_clip(ui, r);
         for (int pass = 1; pass <= 3; pass++) for (int j = 0; j < t->nfeatures; j++) {
             const map_feature *f = &t->features[j];
-            if (pass == 1 && f->kind == 4) map_fill(ui, r, t, f, parks);
+            if (pass == 1 && f->kind == 4 && !m->dragging) map_fill(ui, r, t, f, parks);
             if (pass == 2 && f->kind == 1) map_fill(ui, r, t, f, water);
             if (pass == 3 && (f->kind == 2 || f->kind == 5)) {
                 bool major = !strcmp(f->class_name, "motorway") || !strcmp(f->class_name, "trunk") ||
                              !strcmp(f->class_name, "primary") || !strcmp(f->class_name, "secondary");
-                if (f->kind == 2 && m->z < 9 && !major) continue;
+                if (f->kind == 2 && ((m->z < 9 && !major) || (m->dragging && !major))) continue;
+                if (m->dragging && f->kind == 5) continue;
                 float width = !strcmp(f->class_name, "motorway") ? (m->z >= 11 ? 2.8f : 2.3f) :
                               major ? (m->z >= 11 ? 1.7f : 1.3f) : (m->z >= 12 ? 0.9f : 0.65f);
                 cui_color minor = dark ? cui__rgba(89, 102, 104, 255) : cui__rgba(250, 250, 245, 255);
@@ -449,7 +450,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     double world = 256.0 * (1 << z);
     cx = map_wrap(cx, world); cy = map_clamp(cy, 0, world);
     view->longitude = map_lon(cx, z); view->latitude = map_lat(cy, z); view->zoom = (float)z;
-    m->view = *view; m->z = z;
+    m->view = *view; m->z = z; m->dragging = r.pressed && st->moved;
     if (opts) { m->markers = opts->markers; m->nmarkers = opts->markers && opts->marker_count > 0 ? opts->marker_count : 0;
                 if (m->nmarkers > 4096) m->nmarkers = 4096; }
     for (int i = 0; i < m->nmarkers && (r.hovered || r.clicked); i++) {

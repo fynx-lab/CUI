@@ -7,7 +7,7 @@
 /* Limits apply to uncompressed, untrusted tile data. No CUI context is used
  * during decode, so the host can parse on a worker before handing off a tile. */
 enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
-       MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 8192,
+       MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 16384,
        MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABELS = 64, MAP_CROSSINGS = 2048 };
 typedef struct { const uint8_t *p; size_t n; } map_slice;
 typedef struct { const uint8_t *p, *end; } map_pb;

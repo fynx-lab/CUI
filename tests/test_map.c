@@ -9,7 +9,7 @@
 static int failures;
 /* A long polygon edge is valid even when its vertex count exceeds the
  * per-scanline crossing budget; only actual crossings consume that budget. */
-typedef struct { unsigned char b[16384]; size_t n; } long_pb;
+typedef struct { unsigned char b[65536]; size_t n; } long_pb;
 static void long_var(long_pb *p, unsigned v) {
     while (v >= 128) { p->b[p->n++] = (unsigned char)(v | 128); v >>= 7; }
     p->b[p->n++] = (unsigned char)v;
@@ -45,6 +45,24 @@ static cui_mvt_tile *long_water_tile(void) {
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
 typedef struct { cui_mvt_tile *tile; cui_map_view view; int requests; cui_map_result last; } scene;
+static cui_mvt_tile *large_place_table_tile(void) {
+    long_pb feature = {{0}, 0}, layer = {{0}, 0}, tile = {{0}, 0};
+    long_pb value = {{0}, 0}, tags = {{0}, 0}, geom = {{0}, 0};
+    long_var(&tags, 0); long_var(&tags, 8192); /* last entry exceeds old 8192 cap */
+    long_var(&geom, 9); long_coord(&geom, 0); long_coord(&geom, 0);
+    long_nested(&feature, 2, tags.b, tags.n);
+    long_field(&feature, 3, 1); long_nested(&feature, 4, geom.b, geom.n);
+    long_nested(&layer, 1, "place", 5);
+    long_nested(&layer, 2, feature.b, feature.n);
+    long_nested(&layer, 3, "name", 4);
+    for (int i = 0; i <= 8192; i++) {
+        value.n = 0; long_nested(&value, 1, i == 8192 ? "Last" : "A", i == 8192 ? 4 : 1);
+        long_nested(&layer, 4, value.b, value.n);
+    }
+    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
+    long_nested(&tile, 3, layer.b, layer.n);
+    return cui_mvt_tile_decode(tile.b, tile.n);
+}
 static const cui_mvt_tile *bench_lookup(void *user, int z, int x, int y) {
     return z == 8 && x == 137 && y == 83 ? (const cui_mvt_tile *)user : NULL;
 }
@@ -211,6 +229,9 @@ int main(int argc, char **argv) {
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);
+    cui_mvt_tile *large_values = large_place_table_tile();
+    CHECK(large_values != NULL);
+    cui_mvt_tile_destroy(large_values);
     CHECK(road_vertices(6, "motorway") > road_vertices(6, "primary"));
     CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
     CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));

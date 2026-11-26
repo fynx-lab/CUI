@@ -8,6 +8,7 @@
  * during decode, so the host can parse on a worker before handing off a tile. */
 enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
        MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 16384,
+       MAP_VALUES = 32768,
        MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABEL_COLS = 12,
        MAP_LABEL_ROWS = 8, MAP_LABELS = MAP_LABEL_COLS * MAP_LABEL_ROWS * 2,
        MAP_CROSSINGS = 2048 };
@@ -179,7 +180,7 @@ static bool map_layer(cui_mvt_tile *t, map_slice encoded) {
                map_eq(name, "place") ? 3 : map_eq(name, "landcover") ? 4 :
                map_eq(name, "waterway") ? 5 : 0;
     if (!kind) return true;
-    map_slice *fields = malloc(3 * MAP_FIELDS * sizeof *fields);
+    map_slice *fields = malloc((2 * MAP_FIELDS + MAP_VALUES) * sizeof *fields);
     if (!fields) return false;
     map_slice *features = fields, *keys = fields + MAP_FIELDS, *values = fields + 2 * MAP_FIELDS;
     int nf = 0, nk = 0, nv = 0; bool ok = true;
@@ -190,7 +191,7 @@ static bool map_layer(cui_mvt_tile *t, map_slice encoded) {
         if (id == 2 && wire == 2) { if (nf == MAP_FIELDS || !map_bytes(&p, &features[nf++])) { ok = false; break; } }
         else if (id == 3 && wire == 2) { if (nk == MAP_FIELDS || !map_bytes(&p, &keys[nk++])) { ok = false; break; } }
         else if (id == 4 && wire == 2) {
-            if (nv == MAP_FIELDS || !map_bytes(&p, &v) || !map_value(v, &values[nv++])) { ok = false; break; }
+            if (nv == MAP_VALUES || !map_bytes(&p, &v) || !map_value(v, &values[nv++])) { ok = false; break; }
         }
         else if (!map_skip(&p, wire)) { ok = false; break; }
     }

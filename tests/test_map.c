@@ -64,6 +64,42 @@ static cui_mvt_tile *large_place_table_tile(void) {
     long_nested(&tile, 3, layer.b, layer.n);
     return cui_mvt_tile_decode(tile.b, tile.n);
 }
+/* OpenFreeMap z4/8/5 contains 21,359 place values. Exercise the
+ * observed table size with the last value actually referenced by name. */
+typedef struct { unsigned char b[262144]; size_t n; } large_pb;
+static void large_var(large_pb *b, unsigned n) {
+    while (n >= 128) { b->b[b->n++] = (unsigned char)(n | 128); n >>= 7; }
+    b->b[b->n++] = (unsigned char)n;
+}
+static void large_nested(large_pb *b, unsigned id, const void *data, size_t n) {
+    large_var(b, (id << 3) | 2); large_var(b, (unsigned)n);
+    memcpy(b->b + b->n, data, n); b->n += n;
+}
+static cui_mvt_tile *observed_place_values_tile(void) {
+    map_fixture_buf tags = {{0}, 0}, geom = {{0}, 0};
+    map_fixture_buf feature = {{0}, 0}, value = {{0}, 0};
+    large_pb *layer = malloc(sizeof *layer), *tile = malloc(sizeof *tile);
+    if (!layer || !tile) { free(layer); free(tile); return NULL; }
+    layer->n = tile->n = 0;
+    map_fixture_var(&tags, 0); map_fixture_var(&tags, 21358);
+    map_fixture_var(&geom, 9); map_fixture_coord(&geom, 0); map_fixture_coord(&geom, 0);
+    map_fixture_nested(&feature, 2, tags.b, tags.n);
+    map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
+    large_nested(layer, 1, "place", 5);
+    large_nested(layer, 2, feature.b, feature.n);
+    large_nested(layer, 3, "name", 4);
+    for (int i = 0; i < 21359; i++) {
+        value.n = 0;
+        map_fixture_nested(&value, 1, i == 21358 ? "Last" : "A", i == 21358 ? 4 : 1);
+        large_nested(layer, 4, value.b, value.n);
+    }
+    large_var(layer, 5 << 3); large_var(layer, 4096);
+    large_var(layer, 15 << 3); large_var(layer, 2);
+    large_nested(tile, 3, layer->b, layer->n);
+    cui_mvt_tile *decoded = cui_mvt_tile_decode(tile->b, tile->n);
+    free(layer); free(tile);
+    return decoded;
+}
 static const cui_mvt_tile *bench_lookup(void *user, int z, int x, int y) {
     return z == 8 && x == 137 && y == 83 ? (const cui_mvt_tile *)user : NULL;
 }
@@ -482,6 +518,9 @@ int main(int argc, char **argv) {
     cui_mvt_tile *large_values = large_place_table_tile();
     CHECK(large_values != NULL);
     cui_mvt_tile_destroy(large_values);
+    cui_mvt_tile *observed_values = observed_place_values_tile();
+    CHECK(observed_values != NULL);
+    cui_mvt_tile_destroy(observed_values);
     CHECK(road_vertices(6, "motorway") > road_vertices(6, "primary"));
     CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
     CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));

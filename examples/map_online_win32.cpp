@@ -28,7 +28,7 @@ typedef struct {
     HWND window; bool stopping;
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[RESULT_QUEUE]; int rhead, rtail, rcount;
-    slot tiles[SLOTS]; unsigned frame; size_t cache_bytes;
+    slot tiles[SLOTS]; map_demo_raster_slot images[SLOTS]; unsigned frame; size_t cache_bytes;
     cui_ctx *ui, *raster_ui; cui_sw_renderer *raster_sw;
     unsigned char *raster_pixels; size_t raster_capacity, raster_bytes, raster_tile_bytes;
     float raster_scale;
@@ -192,26 +192,30 @@ static void install_local_cjk_fallback(cui_ctx *ui) {
         if (font >= 0) { cui_font_add_fallback(ui, CUI_FONT_BODY, font); break; }
     }
 }
-static void raster_drop(demo *d, slot *s) {
+static map_demo_raster_slot *raster_find(demo *d, int z, int x, int y) {
+    for (int i = 0; i < SLOTS; i++) {
+        map_demo_raster_slot *s = &d->images[i];
+        if (s->raster && s->z == z && s->x == x && s->y == y) return s;
+    }
+    return NULL;
+}
+static void raster_drop(demo *d, map_demo_raster_slot *s) {
     if (!s->raster) return;
     cui_image_destroy(d->ui, s->raster);
     d->raster_bytes -= d->raster_tile_bytes;
-    s->raster = 0; s->raster_used = 0;
+    *s = map_demo_raster_slot{};
 }
 /* Only called between frames: textures returned to the map remain alive until
- * cui_end_frame, even when cache pressure or a tile replacement follows. */
+ * cui_end_frame, even when decoded data is evicted or a tile is replaced. */
 static void raster_invalidate(demo *d) {
-    for (int i = 0; i < SLOTS; i++) raster_drop(d, &d->tiles[i]);
+    for (int i = 0; i < SLOTS; i++) raster_drop(d, &d->images[i]);
 }
 static cui_texture raster_lookup(void *user, int z, int x, int y) {
     demo *d = static_cast<demo *>(user);
-    for (int i = 0; i < SLOTS; i++) {
-        slot *s = &d->tiles[i];
-        if (s->raster && s->state == 2 && s->z == z && s->x == x && s->y == y) {
-            s->raster_used = d->frame; d->raster_hits++; return s->raster;
-        }
-    }
-    return 0;
+    map_demo_raster_slot *s = raster_find(d, z, x, y);
+    if (!s) return 0;
+    s->raster_used = d->frame; d->raster_hits++;
+    return s->raster;
 }
 static bool raster_prepare(demo *d) {
     if (!d->raster_ui || !d->raster_sw) return false;
@@ -228,15 +232,22 @@ static bool raster_prepare(demo *d) {
     int selected = -1;
     for (int i = 0; i < SLOTS; i++) {
         slot *s = &d->tiles[i];
-        if (s->state == 2 && s->tile && !s->raster && s->used == d->frame - 1) {
+        if (s->state == 2 && s->tile && !raster_find(d, s->z, s->x, s->y) && s->used == d->frame - 1) {
             selected = i; break;
         }
     }
     if (selected < 0) return false;
     while (d->raster_bytes > RASTER_BUDGET - bytes) {
-        int victim = map_demo_raster_victim(d->tiles, SLOTS, d->frame - 1);
+        int victim = map_demo_raster_victim(d->images, SLOTS, d->frame - 1);
         if (victim < 0) return false; /* keep visible tiles rather than thrash */
-        raster_drop(d, &d->tiles[victim]);
+        raster_drop(d, &d->images[victim]);
+    }
+    int image = -1;
+    for (int i = 0; i < SLOTS; i++) if (!d->images[i].raster) { image = i; break; }
+    if (image < 0) {
+        image = map_demo_raster_victim(d->images, SLOTS, d->frame - 1);
+        if (image < 0) return false;
+        raster_drop(d, &d->images[image]);
     }
     if (d->raster_capacity < bytes) {
         void *next = realloc(d->raster_pixels, bytes);
@@ -249,12 +260,14 @@ static bool raster_prepare(demo *d) {
     cui_end_frame(d->raster_ui);
     cui_sw_render(d->raster_sw, cui_get_draw_data(d->raster_ui), d->raster_pixels,
                   pixels, pixels, pixels * 4, CUI_SW_RGBA);
-    s->raster = cui_image_create(d->ui, pixels, pixels, d->raster_pixels);
-    if (s->raster) { s->raster_used = d->frame; d->raster_bytes += bytes; }
-    return s->raster != 0;
+    cui_texture texture = cui_image_create(d->ui, pixels, pixels, d->raster_pixels);
+    if (texture) {
+        d->images[image] = map_demo_raster_slot{s->z, s->x, s->y, texture, d->frame};
+        d->raster_bytes += bytes;
+    }
+    return texture != 0;
 }
 static void cache_drop(demo *d, slot *s) {
-    raster_drop(d, s);
     if (s->state == 3 && d->failures > 0) d->failures--;
     if (s->tile) {
         size_t bytes = cui_mvt_tile_memory_usage(s->tile);
@@ -325,6 +338,11 @@ static void tile_request(void *user, int z, int x, int y) {
     slot *existing = find(d, z, x, y);
     bool retry = existing && map_demo_retry_due(*existing, GetTickCount());
     if (d->tilejson != 1 || (existing && !retry)) return;
+    /* When decoded memory is saturated, an image-only tile can still be
+     * displayed. Do not fetch it again on every drag frame just for labels;
+     * reserve requests for tiles with no usable image. */
+    if (!existing && d->cache_bytes >= CACHE_BUDGET * 9 / 10 &&
+        raster_find(d, z, x, y)) return;
     int index = existing ? (int)(existing - d->tiles) : -1; unsigned oldest = ~0u;
     if (index < 0) for (int i = 0; i < SLOTS; i++) {
         slot *s = &d->tiles[i];
@@ -358,10 +376,8 @@ static void stop(demo *d) {
     WaitForMultipleObjects(WORKERS, d->threads, TRUE, INFINITE);
     for (int i = 0; i < WORKERS; i++) CloseHandle(d->threads[i]);
     CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock);
-    for (int i = 0; i < SLOTS; i++) {
-        raster_drop(d, &d->tiles[i]);
-        cui_mvt_tile_destroy(d->tiles[i].tile);
-    }
+    raster_invalidate(d);
+    for (int i = 0; i < SLOTS; i++) cui_mvt_tile_destroy(d->tiles[i].tile);
     free(d->raster_pixels);
     cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
     while (d->rcount) {
@@ -521,8 +537,9 @@ int main(void) {
         cui_map_result hit = cui_map_ex(ui, "online-map", &d->view, &options);
         if (baked) for (int i = 0; i < SLOTS; i++) {
             slot *s = &d->tiles[i];
-            if (s->state == 2 && s->used == d->frame && !s->raster &&
-                d->raster_bytes <= RASTER_BUDGET - d->raster_tile_bytes) {
+            if (s->state == 2 && s->used == d->frame && !raster_find(d, s->z, s->x, s->y) &&
+                (d->raster_bytes <= RASTER_BUDGET - d->raster_tile_bytes ||
+                 map_demo_raster_victim(d->images, SLOTS, d->frame - 1) >= 0)) {
                 cui_request_redraw(ui); break;
             }
         }

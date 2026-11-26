@@ -25,7 +25,7 @@ bool map_demo_retry_due(const map_demo_slot &slot, unsigned now) {
            (int32_t)(now - slot.next_retry_tick) >= 0;
 }
 
-int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previous_frame) {
+int map_demo_raster_victim(const map_demo_raster_slot *slots, int count, unsigned previous_frame) {
     int oldest = -1;
     for (int i = 0; i < count; i++) {
         if (!slots[i].raster || slots[i].raster_used == previous_frame) continue;

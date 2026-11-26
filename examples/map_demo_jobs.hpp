@@ -10,6 +10,10 @@ struct map_demo_slot {
     cui_mvt_tile *tile;
     uint64_t token;
     unsigned next_retry_tick, status, retry_count;
+};
+/* Independent 48 MiB image cache. Decoded-slot reuse must not discard these. */
+struct map_demo_raster_slot {
+    int z, x, y;
     cui_texture raster;
     unsigned raster_used;
 };
@@ -36,7 +40,7 @@ void map_demo_note_failure(map_demo_slot &slot, unsigned status, unsigned retry_
 bool map_demo_retry_due(const map_demo_slot &slot, unsigned now);
 /* Choose the oldest raster unused in the previous frame. Returns -1 if all
  * textures could still be referenced by that frame or none exist. */
-int map_demo_raster_victim(const map_demo_slot *slots, int count, unsigned previous_frame);
+int map_demo_raster_victim(const map_demo_raster_slot *slots, int count, unsigned previous_frame);
 /* Called after the previous frame has been presented, before constructing the
  * next one. Prefer tiles from other zoom levels, then the oldest target tile. */
 int map_demo_decoded_victim(const map_demo_slot *slots, int count, int target_zoom);

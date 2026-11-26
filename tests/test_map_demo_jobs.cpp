@@ -60,7 +60,7 @@ int main() {
     CHECK(map_demo_retry_due(failed, 6000)); /* capacity is temporary */
     map_demo_note_failure(failed, 508, 0, 6000);
     CHECK(!map_demo_retry_due(failed, 99999)); /* tile larger than cache */
-    map_demo_slot images[4] = {};
+    map_demo_raster_slot images[4] = {};
     images[0].raster = 1; images[0].raster_used = 4;
     images[1].raster = 2; images[1].raster_used = 2;
     images[2].raster = 3; images[2].raster_used = 6;

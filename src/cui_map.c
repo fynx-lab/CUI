@@ -375,7 +375,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     for (int i = 0; i < m->count; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
         cui_rect r = {bounds.x + m->refs[i].x, bounds.y + m->refs[i].y, m->refs[i].size, m->refs[i].size};
-        if (!t) {
+        if (!t && !m->refs[i].image) {
             bool filled = false;
             cui_push_clip(ui, bounds);
             cui_push_clip(ui, r);
@@ -491,7 +491,7 @@ static void map_collect_fallback(map_paint *m, const cui_map_opts *opts, int z, 
         for (int x = minx; x <= maxx && m->fallback_count - first < MAP_REFS / 4; x++) {
             int tx = (x % tiles + tiles) % tiles;
             const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
-            cui_texture image = tile && opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
+            cui_texture image = opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
             if (!tile && !image) continue;
             m->fallback[m->fallback_count++] = (map_ref){tile, image,
                 (float)(x * size - cx + rect.w / 2), (float)(y * size - cy + rect.h / 2), (float)size, z};
@@ -648,12 +648,12 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
             for (int x = minx; x <= maxx && m->count < MAP_REFS; x++) {
                 int tx = (x % tiles + tiles) % tiles;
                 const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
+                cui_texture image = opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
                 if (!tile) {
-                    missing++;
+                    if (!image) missing++;
                     if (opts->request && x >= req_minx && x <= req_maxx &&
                         y >= req_miny && y <= req_maxy) opts->request(opts->tile_user, z, tx, y);
                 }
-                cui_texture image = tile && opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
                 m->refs[m->count++] = (map_ref){tile, image,
                     (float)(x * size - cx + r.rect.w / 2), (float)(y * size - cy + r.rect.h / 2), (float)size, z};
             }

@@ -163,9 +163,9 @@ static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
     if (off && ui && off_sw && main_sw) {
         int px = 256 * scale;
         size_t bytes = (size_t)px * px * 4;
-        unsigned char *off_px = malloc(bytes), *vector_px = malloc(bytes), *cached_px = malloc(bytes);
-        CHECK(off_px && vector_px && cached_px);
-        if (off_px && vector_px && cached_px) {
+        unsigned char *off_px = malloc(bytes), *vector_px = malloc(bytes), *cached_px = malloc(bytes), *image_only_px = malloc(bytes);
+        CHECK(off_px && vector_px && cached_px && image_only_px);
+        if (off_px && vector_px && cached_px && image_only_px) {
             cui_set_viewport(off, 256, 256, (float)scale);
             cui_begin_frame(off, 1.f/60);
             cui_map_tile_draw_base(off, tile, (cui_rect){0, 0, 256, 256}, 0);
@@ -188,9 +188,21 @@ static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
                 size_t p = (size_t)((y * scale) * px + x * scale) * 4;
                 CHECK(memcmp(vector_px + p, cached_px + p, 3) == 0);
             }
+            /* A host may discard decoded geometry while retaining its image.
+             * The widget must still draw that image, without frozen labels. */
+            test.tile = NULL;
+            raster_test_frame(ui, &test, true);
+            cui_sw_render(main_sw, cui_get_draw_data(ui), image_only_px, px, px, px * 4, CUI_SW_RGBA);
+            int matching = 0;
+            for (int y = 16; y < 240; y += 32) for (int x = 16; x < 240; x += 32) {
+                size_t p = (size_t)((y * scale) * px + x * scale) * 4;
+                if (memcmp(cached_px + p, image_only_px + p, 3) == 0) matching++;
+            }
+            CHECK(matching >= 30); /* labels can disappear with decoded data */
+            CHECK(cui_get_draw_data(ui)->vertex_count < normal_vertices);
             cui_image_destroy(ui, test.raster);
         }
-        free(off_px); free(vector_px); free(cached_px);
+        free(off_px); free(vector_px); free(cached_px); free(image_only_px);
     }
     cui_destroy(off); cui_destroy(ui); cui_sw_destroy(off_sw); cui_sw_destroy(main_sw);
     cui_mvt_tile_destroy(tile);

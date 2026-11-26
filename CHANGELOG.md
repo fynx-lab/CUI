@@ -57,6 +57,7 @@ What changed in CUI, newest first. Every component mentioned here runs live in t
 
 ### Changed
 
+- Add a host-only per-user file cache for the Windows OpenFreeMap map demo: decoded memory → validated on-disk MVT bytes → network for visible tiles. Save only successfully decoded 200 responses under a source-version namespace, with atomic writes, last-good validated TileJSON for network outages, an online refresh action, and no automatic disk eviction. The C99 core and RAM budgets remain unchanged.
 - Double the Windows map demo's decoded cache from 96 MiB/192 entries to 192 MiB/384 entries and its independent rendered-image cache from 48 MiB/192 entries to 96 MiB/384 entries. Keep viewport-only requests, one tile image baked per frame, and the 2 MiB uncompressed input bound unchanged.
 - Anchor place-label distribution to tile/world coordinates rather than viewport grid lines, so interior labels do not switch quota cells when panning. Keep the 192-label cap, two-pass collision checks and marker precedence; no city/town ranking is implied.
 - Keep the Windows map demo's 48 MiB rendered tile images independent of the 96 MiB decoded-tile cache: revisit cached imagery after decoded-slot eviction without redrawing roads, while preserving live markers and bounded viewport requests. Image-only tiles can temporarily lack place labels until decoded data returns.

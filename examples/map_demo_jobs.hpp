@@ -21,6 +21,7 @@ struct map_demo_job {
     int z, x, y;
     char path[240];
     uint64_t token;
+    char tile_template[240]; /* validated source identity, pinned when queued */
 };
 
 /* Caller holds its queue lock. Only the UI thread touches slots. Jobs are

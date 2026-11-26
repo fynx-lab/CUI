@@ -8,6 +8,8 @@
 #include <cui/cui_render.h>
 #include "map_tilejson.hpp"
 #include "map_demo_jobs.hpp"
+#include "map_disk_cache.hpp"
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,11 +23,12 @@
 #define BODY_CAP (2 * 1024 * 1024)
 typedef map_demo_slot slot;
 typedef map_demo_job job;
-typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_t token; char *json; cui_mvt_tile *tile; } result;
+typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_t token; char *json; cui_mvt_tile *tile; bool offline, cached_tile; } result;
 typedef struct {
     CRITICAL_SECTION lock;
     HANDLE available, stop_event, threads[WORKERS];
-    HWND window; bool stopping;
+    HWND window; bool stopping, offline, refreshing;
+    map_disk_cache *disk;
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[RESULT_QUEUE]; int rhead, rtail, rcount;
     slot tiles[SLOTS]; map_demo_raster_slot images[SLOTS]; unsigned frame; size_t cache_bytes;
@@ -33,7 +36,7 @@ typedef struct {
     unsigned char *raster_pixels; size_t raster_capacity, raster_bytes, raster_tile_bytes;
     float raster_scale;
     char template_path[240]; int min_zoom, max_zoom, tilejson; int failures, selected;
-    int pending, loaded; unsigned long long hits, misses, raster_hits; DWORD last_status; uint64_t next_token;
+    int pending, loaded; unsigned long long hits, misses, raster_hits, disk_hits, network_hits; DWORD last_status; uint64_t next_token;
     cui_map_view view;
 } demo;
 
@@ -129,12 +132,23 @@ static DWORD WINAPI worker(void *arg) {
         char *bytes = NULL;
         DWORD status = 0; unsigned retry_after_ms = 0;
         int n = -1;
-        for (int attempt = 1; attempt <= 3; attempt++) {
-            /* Deterministic transport-failure smoke test; no tile HTTP in this mode. */
-            const char *fault = j.z >= 0 ? getenv("CUI_MAP_DEMO_TILE_FAULT") : NULL;
-            if (!fault && j.z >= 0 && j.z != (getenv("CUI_MAP_DEMO_BEIJING") ? 7 : 8) &&
-                getenv("CUI_MAP_DEMO_ZOOM_FAULT")) fault = "404";
-            if (fault && (!strcmp(fault, "404") || !strcmp(fault, "503") || !strcmp(fault, "0"))) {
+        /* File work and decoding are kept on this worker; the UI only admits
+         * the completed tile. Fault probes bypass the disk cache as well. */
+        const char *fault = j.z >= 0 ? getenv("CUI_MAP_DEMO_TILE_FAULT") : NULL;
+        if (!fault && j.z >= 0 && j.z != (getenv("CUI_MAP_DEMO_BEIJING") ? 7 : 8) &&
+            getenv("CUI_MAP_DEMO_ZOOM_FAULT")) fault = "404";
+        bool forced_fault = fault && (!strcmp(fault, "404") || !strcmp(fault, "503") || !strcmp(fault, "0"));
+        cui_mvt_tile *disk_tile = NULL;
+        if (j.z >= 0 && !forced_fault && d->disk) {
+            std::string cached;
+            if (d->disk->read_tile(j.tile_template, j.z, j.x, j.y, cached)) {
+                disk_tile = cui_mvt_tile_decode(cached.data(), cached.size());
+                if (disk_tile) d->disk->touch_tile(j.tile_template, j.z, j.x, j.y);
+                else d->disk->remove_tile(j.tile_template, j.z, j.x, j.y);
+            }
+        }
+        if (!disk_tile) for (int attempt = 1; attempt <= 3; attempt++) {
+            if (forced_fault) {
                 n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
             } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
             if (n > 0 || status == 200 || (status && status != 429 && status != 503 && status < 500) || attempt == 3) break;
@@ -142,9 +156,35 @@ static DWORD WINAPI worker(void *arg) {
                                                       GetTickCount() ^ (unsigned)j.token);
             if (WaitForSingleObject(d->stop_event, delay) != WAIT_TIMEOUT) break;
         }
-        result r = {j.z, j.x, j.y, n > 0, status, retry_after_ms, j.token, NULL, NULL};
-        if (j.z < 0) r.json = bytes;
-        else { if (n > 0) r.tile = cui_mvt_tile_decode(bytes, (size_t)n); r.ok = r.tile != NULL; free(bytes); }
+        result r = {j.z, j.x, j.y, n > 0 || disk_tile != NULL, status, retry_after_ms, j.token, NULL, NULL, false, disk_tile != NULL};
+        if (j.z < 0) {
+            map_tilejson parsed; std::string error;
+            bool valid_network = n > 0 && map_parse_tilejson(bytes, parsed, error);
+            if (valid_network) {
+                if (d->disk) d->disk->write_tilejson(bytes, (size_t)n);
+                r.json = bytes;
+            } else {
+                free(bytes);
+                if (!getenv("CUI_MAP_DEMO_OFFLINE") &&
+                    (status == 0 || status == 429 || status >= 500) && d->disk) {
+                    std::string saved;
+                    if (d->disk->read_tilejson(saved) && map_parse_tilejson(saved, parsed, error)) {
+                        r.json = static_cast<char *>(malloc(saved.size() + 1));
+                        if (r.json) { memcpy(r.json, saved.data(), saved.size()); r.json[saved.size()] = 0; r.offline = true; }
+                    }
+                }
+            }
+            r.ok = r.json != NULL;
+        } else {
+            r.tile = disk_tile;
+            if (!r.tile && n > 0) {
+                r.tile = cui_mvt_tile_decode(bytes, (size_t)n);
+                if (r.tile && status == 200 && d->disk)
+                    d->disk->write_tile(j.tile_template, j.z, j.x, j.y, bytes, (size_t)n);
+            }
+            r.ok = r.tile != NULL;
+            free(bytes);
+        }
         /* A slow UI frame can finish more than 68 jobs before it drains the
          * result queue. Never drop a result and strand its slot as pending. */
         for (;;) {
@@ -300,8 +340,27 @@ static void pump(demo *d) {
     for (int i = 0; i < count; i++) {
         result *r = &results[i];
         if (r->z < 0) {
-            d->tilejson = r->ok && template_from_json(d, r->json) ? 1 : -1;
-            if (d->tilejson < 0) d->last_status = r->status;
+            d->refreshing = false;
+            char previous[sizeof d->template_path];
+            memcpy(previous, d->template_path, sizeof previous);
+            if (r->ok && template_from_json(d, r->json)) {
+                if (previous[0] && strcmp(previous, d->template_path)) {
+                    /* Old tiles and images must never be shown under a new
+                     * TileJSON source. Running jobs retain old tokens and the
+                     * queued old-version work becomes obsolete. */
+                    for (int k = 0; k < SLOTS; k++) cache_drop(d, &d->tiles[k]);
+                    raster_invalidate(d);
+                    EnterCriticalSection(&d->lock);
+                    d->jhead = d->jtail; d->jcount = 0;
+                    ResetEvent(d->available);
+                    LeaveCriticalSection(&d->lock);
+                    d->failures = 0;
+                }
+                d->tilejson = 1; d->offline = r->offline;
+                if (r->offline) d->last_status = r->status;
+            } else if (d->tilejson != 1) {
+                d->tilejson = -1; d->last_status = r->status;
+            } else d->last_status = r->status; /* failed refresh: keep offline map */
             free(r->json);
         } else {
             slot *s = NULL;
@@ -310,6 +369,7 @@ static void pump(demo *d) {
                 size_t bytes = cui_mvt_tile_memory_usage(r->tile);
                 if (r->ok && cache_make_room(d, bytes, r->z)) {
                     s->tile = r->tile; d->cache_bytes += bytes; s->state = 2;
+                    if (r->cached_tile) d->disk_hits++; else d->network_hits++;
                 } else {
                     if (r->ok) d->last_status = bytes > CACHE_BUDGET ? 508 : 507;
                     else d->last_status = r->status;
@@ -367,6 +427,7 @@ static void tile_request(void *user, int z, int x, int y) {
     *s = slot{z, x, y, 1, d->frame, NULL, d->next_token};
     s->retry_count = retry_count;
     job j = {z, x, y, "", d->next_token}; memcpy(j.path, path, (size_t)n + 1);
+    memcpy(j.tile_template, d->template_path, strlen(d->template_path) + 1);
     if (!queue_job(d, j)) { *s = slot{}; return; }
 }
 static void stop(demo *d) {
@@ -384,6 +445,7 @@ static void stop(demo *d) {
         result *r = &d->results[d->rhead]; free(r->json); cui_mvt_tile_destroy(r->tile);
         d->rhead = (d->rhead + 1) % RESULT_QUEUE; d->rcount--;
     }
+    delete d->disk;
 }
 static void map_profile_report(FILE *out, const demo *d, unsigned frames,
                                const double *sum, const double *peak,
@@ -429,6 +491,7 @@ int main(void) {
         d->raster_ui = NULL; d->raster_sw = NULL;
     }
     d->window = (HWND)cui_app_native_window(app);
+    d->disk = new (std::nothrow) map_disk_cache(); /* unavailable disk degrades to network */
     int started = 0;
     for (; started < WORKERS; started++) {
         d->threads[started] = CreateThread(NULL, 0, worker, d, 0, NULL);
@@ -440,7 +503,7 @@ int main(void) {
         SetEvent(d->available);
         if (started) WaitForMultipleObjects(started, d->threads, TRUE, INFINITE);
         for (int i = 0; i < started; i++) CloseHandle(d->threads[i]);
-        CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock); cui_app_destroy(app); free(d); return 1;
+        CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock); delete d->disk; cui_app_destroy(app); free(d); return 1;
     }
     job first = {-1, 0, 0, "/planet", 1};
     if (getenv("CUI_MAP_DEMO_OFFLINE")) d->tilejson = -1; /* deterministic failure-state smoke test */
@@ -513,6 +576,11 @@ int main(void) {
                               d->last_status == 200 ? "Invalid TileJSON from tile service." :
                               "Tile service unavailable.");
             if (cui_button_ex(ui, "Retry", nullptr)) { d->tilejson = 0; queue_job(d, first); }
+        } else if (d->offline) {
+            cui_secondary(ui, d->refreshing ? "Checking online TileJSON..." :
+                                       "Offline · showing locally cached tiles");
+            if (!d->refreshing && cui_button_ex(ui, "Retry online", nullptr))
+                d->refreshing = queue_job(d, first);
         } else if (d->failures) {
             cui_textf(ui, "%d tiles unavailable%s", d->failures,
                       (d->last_status == 429 || d->last_status == 503) ? " (throttled)" :
@@ -555,9 +623,9 @@ int main(void) {
         if (hit.clicked_marker >= 0) d->selected = hit.clicked_marker;
         cui_column_begin(ui, &footer);
         cui_text_ex(ui, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", nullptr);
-        cui_textf(ui, "z%d · Cache %.1f/192 MiB · Raster %.1f/96 MiB · H%llu/M%llu",
+        cui_textf(ui, "z%d · Cache %.1f/192 MiB · Raster %.1f/96 MiB · D%llu/N%llu",
                   (int)d->view.zoom, (double)d->cache_bytes / (1024 * 1024),
-                  (double)d->raster_bytes / (1024 * 1024), d->hits, d->misses);
+                  (double)d->raster_bytes / (1024 * 1024), d->disk_hits, d->network_hits);
         bool shown_failure = false;
         for (int i = 0; i < SLOTS; i++) {
             slot *s = &d->tiles[i];

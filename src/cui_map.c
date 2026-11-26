@@ -11,6 +11,7 @@ enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
        MAP_VALUES = 32768,
        MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABEL_COLS = 12,
        MAP_LABEL_ROWS = 8, MAP_LABELS = MAP_LABEL_COLS * MAP_LABEL_ROWS * 2,
+       MAP_LABEL_CELL = 192, MAP_LABEL_CELL_SLOTS = 512,
        MAP_CROSSINGS = 2048 };
 typedef struct { const uint8_t *p; size_t n; } map_slice;
 typedef struct { const uint8_t *p, *end; } map_pb;
@@ -287,7 +288,7 @@ static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
                       CUI_CORNERS(0), color);
     }
 }
-typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; int z; } map_ref;
+typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; int z, tx, ty; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
     int z, count, fallback_count; float scale; bool dragging;
@@ -401,10 +402,12 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_pop_clip(ui);
         } else map_draw_base(ui, t, r, m->z, m->dragging);
     }
-    /* One label per viewport cell first, then a second pass for density.
-     * A global cap alone exhausts on the first (top-left) tiles in a large
-     * window, leaving the rest of the map nameless. Keep collision global. */
-    unsigned char cell_counts[MAP_LABEL_COLS * MAP_LABEL_ROWS] = {0};
+    /* Cells follow tile/world coordinates, not the viewport. An interior
+     * place keeps its cell while panning instead of losing its quota whenever
+     * an invisible screen-grid line passes over it. One per cell first, then
+     * a second pass for density; collision and the global cap remain live. */
+    uint64_t cell_keys[MAP_LABEL_CELL_SLOTS] = {0};
+    unsigned char cell_counts[MAP_LABEL_CELL_SLOTS] = {0};
     if (bounds.w > 0 && bounds.h > 0) for (int pass = 0; pass < 2 && labels < MAP_LABELS; pass++) {
         for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
             const cui_mvt_tile *t = m->refs[i].tile;
@@ -418,11 +421,14 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                                 oy + (float)p.y * m->refs[i].size / f->extent};
                 if (pos.x < bounds.x || pos.y < bounds.y ||
                     pos.x >= bounds.x + bounds.w || pos.y >= bounds.y + bounds.h) continue;
-                int col = (int)((pos.x - bounds.x) * MAP_LABEL_COLS / bounds.w);
-                int row = (int)((pos.y - bounds.y) * MAP_LABEL_ROWS / bounds.h);
-                if (col >= MAP_LABEL_COLS) col = MAP_LABEL_COLS - 1;
-                if (row >= MAP_LABEL_ROWS) row = MAP_LABEL_ROWS - 1;
-                int cell = row * MAP_LABEL_COLS + col;
+                int col = (int)floor(((double)m->refs[i].tx * 256.0 +
+                                      (double)p.x * 256.0 / f->extent) / MAP_LABEL_CELL);
+                int row = (int)floor(((double)m->refs[i].ty * 256.0 +
+                                      (double)p.y * 256.0 / f->extent) / MAP_LABEL_CELL);
+                uint64_t key = ((uint64_t)(uint32_t)col << 32) | (uint32_t)row;
+                unsigned cell = (unsigned)(key ^ (key >> 32)) * 2654435761u & (MAP_LABEL_CELL_SLOTS - 1);
+                while (cell_counts[cell] && cell_keys[cell] != key)
+                    cell = (cell + 1) & (MAP_LABEL_CELL_SLOTS - 1);
                 if (cell_counts[cell] > pass) continue;
                 cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
                 cui_rect box = {pos.x, pos.y, text.width, text.height};
@@ -430,6 +436,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                 bool overlap = false;
                 for (int k = 0; k < labels; k++) if (box.x < used[k].x + used[k].w + 6 && box.x + box.w + 6 > used[k].x && box.y < used[k].y + used[k].h + 4 && box.y + box.h + 4 > used[k].y) { overlap = true; break; }
                 if (!overlap) {
+                    cell_keys[cell] = key;
                     cell_counts[cell]++;
                     used[labels++] = box;
                     cui_draw_text(ui, CUI_FONT_BODY, 12, pos,
@@ -494,7 +501,7 @@ static void map_collect_fallback(map_paint *m, const cui_map_opts *opts, int z, 
             cui_texture image = opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
             if (!tile && !image) continue;
             m->fallback[m->fallback_count++] = (map_ref){tile, image,
-                (float)(x * size - cx + rect.w / 2), (float)(y * size - cy + rect.h / 2), (float)size, z};
+                (float)(x * size - cx + rect.w / 2), (float)(y * size - cy + rect.h / 2), (float)size, z, tx, y};
         }
     }
 }
@@ -655,7 +662,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
                         y >= req_miny && y <= req_maxy) opts->request(opts->tile_user, z, tx, y);
                 }
                 m->refs[m->count++] = (map_ref){tile, image,
-                    (float)(x * size - cx + r.rect.w / 2), (float)(y * size - cy + r.rect.h / 2), (float)size, z};
+                    (float)(x * size - cx + r.rect.w / 2), (float)(y * size - cy + r.rect.h / 2), (float)size, z, tx, y};
             }
         }
         if (!missing) { st->source = st->recent = z; m->fallback_count = 0; }

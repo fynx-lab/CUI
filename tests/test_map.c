@@ -583,10 +583,11 @@ int main(int argc, char **argv) {
     cui_mvt_tile *observed_values = observed_place_values_tile();
     CHECK(observed_values != NULL);
     cui_mvt_tile_destroy(observed_values);
-    CHECK(road_vertices(7, "motorway") > road_vertices(7, "primary"));
-    CHECK(road_vertices(8, "primary") > road_vertices(8, "secondary"));
+    CHECK(road_vertices(5, "motorway") > road_vertices(5, "trunk"));
+    CHECK(road_vertices(6, "trunk") > road_vertices(6, "primary"));
+    CHECK(road_vertices(8, "trunk") > road_vertices(8, "primary"));
     CHECK(road_vertices(9, "primary") > road_vertices(9, "secondary"));
-    CHECK(road_vertices(10, "secondary") > road_vertices(10, "residential"));
+    CHECK(road_vertices(10, "primary") > road_vertices(10, "secondary"));
     CHECK(road_vertices(11, "secondary") > road_vertices(11, "residential"));
     CHECK(road_vertices(12, "secondary") > road_vertices(12, "residential"));
     CHECK(road_vertices(13, "residential") > road_vertices(12, "residential"));

@@ -782,6 +782,9 @@ typedef enum cui_placement {
  * cui_popover_toggle / cui_popover_open. */
 typedef struct cui_popover_opts { int _; cui_placement placement; float width; float pad; float gap; } cui_popover_opts;
 CUI_API bool cui_popover_begin(cui_ctx *ui, const char *id, const cui_popover_opts *opts);
+/* A popover anchored to a logical window point, updated every frame. It is
+ * clamped to the viewport and closes on outside click or Escape. */
+CUI_API bool cui_popover_begin_at(cui_ctx *ui, const char *id, cui_vec2 point, const cui_popover_opts *opts);
 CUI_API void cui_popover_end(cui_ctx *ui);
 
 /* Guided tour: a spotlight on one control at a time, with a card beside it
@@ -5160,7 +5163,10 @@ CUI_API void cui_map_tile_draw_base_styled(cui_ctx *ui, const cui_mvt_tile *tile
                                             cui_rect rect, int zoom, const cui_map_palette *palette);
 CUI_API void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom);
 typedef struct cui_map_view { double latitude, longitude; float zoom; } cui_map_view;
-typedef struct cui_map_marker { int id; double latitude, longitude; const char *label; } cui_map_marker;
+typedef struct cui_map_marker {
+    int id; double latitude, longitude; const char *label;
+    int count; /* >1 draws a numbered cluster badge; 0/1 keeps the usual marker */
+} cui_map_marker;
 typedef const cui_mvt_tile *(*cui_map_tile_lookup)(void *user, int z, int x, int y);
 /* Optional texture for the base geometry of a decoded 256x256 tile. The
  * caller keeps it alive through cui_end_frame. Return 0 for vector fallback
@@ -5182,9 +5188,24 @@ typedef struct cui_map_opts {
                                        * Default false retains immediate vector drawing. */
     const cui_map_palette *palette;    /* NULL follows this CUI context's light/dark theme; copied per frame */
 } cui_map_opts;
+/* Snapshot of the actual animated transform used to paint and hit-test a map
+ * during this frame. Window coordinates are logical CUI units, not device px. */
+typedef struct cui_map_projection {
+    cui_rect rect;
+    cui_map_view view;
+    float scale;
+    bool animating;
+} cui_map_projection;
+/* World pixels at an integer zoom, independent of viewport/pan. X wraps at
+ * 256*2^zoom; the caller may use this for stable spatial grouping. */
+CUI_API bool cui_map_world_point(int zoom, double latitude, double longitude, double *x, double *y);
+/* Projects a geographic point using exactly this frame's map transform.
+ * Returns false for invalid coordinates or a point outside the map rect. */
+CUI_API bool cui_map_project(const cui_map_projection *p, double latitude, double longitude, cui_vec2 *position);
 typedef struct cui_map_result {
     bool view_changed;
     int hovered_marker, clicked_marker; /* -1 when absent; marker ids must be nonnegative */
+    cui_map_projection projection; /* valid only when its rect has positive width/height */
 } cui_map_result;
 CUI_API cui_map_result cui_map_ex(cui_ctx *ui, const char *id, cui_map_view *view, const cui_map_opts *opts);
 

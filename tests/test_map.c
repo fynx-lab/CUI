@@ -587,6 +587,40 @@ static void frame(cui_ctx *ui, scene *s) {
     }
     cui_end_frame(ui);
 }
+static void check_marker_badge_hit(void) {
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_LIGHT});
+    CHECK(ui != NULL);
+    if (!ui) return;
+    cui_set_viewport(ui, 256, 256, 1);
+    cui_map_view view = {0, 0, 0};
+    static const cui_map_marker badge[] = {{31, 0, 0, NULL, 12}};
+    cui_map_opts opts = {0}; opts.markers = badge; opts.marker_count = 1;
+    cui_map_result hit = {0};
+    for (int i = 0; i < 2; i++) {
+        cui_begin_frame(ui, 1.f / 60);
+        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+            hit = cui_map_ex(ui, "badge", &view, &opts);
+        cui_end_frame(ui);
+    }
+    cui_input_mouse_move(ui, 140, 128);
+    cui_begin_frame(ui, 1.f / 60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+        hit = cui_map_ex(ui, "badge", &view, &opts);
+    cui_end_frame(ui);
+    CHECK(hit.hovered_marker == 31);
+    cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
+    cui_begin_frame(ui, 1.f / 60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+        hit = cui_map_ex(ui, "badge", &view, &opts);
+    cui_end_frame(ui);
+    cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+    cui_begin_frame(ui, 1.f / 60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+        hit = cui_map_ex(ui, "badge", &view, &opts);
+    cui_end_frame(ui);
+    CHECK(hit.clicked_marker == 31);
+    cui_destroy(ui);
+}
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--drag-bench")) return bench_drag(argv[2]);
     if (argc > 1) {
@@ -629,6 +663,16 @@ int main(int argc, char **argv) {
             scene s = {t, {0, 0, 0}, 0};
             cui_set_viewport(ui, 256, 256, 1);
             frame(ui, &s); frame(ui, &s);
+            double wx = -1, wy = -1;
+            cui_vec2 projected = {-1, -1};
+            CHECK(cui_map_world_point(0, 0, 0, &wx, &wy) && wx == 128 && wy == 128);
+            CHECK(!cui_map_world_point(15, 0, 0, &wx, &wy));
+            CHECK(!cui_map_world_point(0, 91, 0, &wx, &wy));
+            CHECK(cui_map_project(&s.last.projection, 0, 0, &projected));
+            CHECK(fabs(projected.x - 128) < 0.1 && fabs(projected.y - 128) < 0.1);
+            cui_map_projection cropped = s.last.projection;
+            cropped.rect.w = cropped.rect.h = 30;
+            CHECK(!cui_map_project(&cropped, 45, 0, &projected));
             const cui_draw_data *dd = cui_get_draw_data(ui);
             unsigned char pixels[256 * 256 * 4] = {0};
             cui_sw_renderer *sw = cui_sw_create();
@@ -646,9 +690,11 @@ int main(int argc, char **argv) {
             cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true); frame(ui, &s);
             cui_input_mouse_move(ui, 185, 128); frame(ui, &s);
             CHECK(s.last.view_changed && fabs(s.view.longitude) > 1);
+            CHECK(cui_map_project(&s.last.projection, 0, 0, &projected));
+            CHECK(fabs(projected.x - 158) < 0.1 && fabs(projected.y - 128) < 0.1);
             cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false); frame(ui, &s);
             cui_input_scroll(ui, 0, 1); frame(ui, &s);
-            CHECK(s.view.zoom == 1);
+            CHECK(s.view.zoom == 1 && s.last.projection.animating);
             double before_key = s.view.longitude;
             cui_input_key(ui, CUI_KEY_RIGHT, true, 0); frame(ui, &s);
             CHECK(s.last.view_changed && s.view.longitude != before_key);
@@ -700,6 +746,7 @@ int main(int argc, char **argv) {
     check_labels_stable_across_pan();
     check_detailed_names();
     check_optional_label_table_overflow();
+    check_marker_badge_hit();
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

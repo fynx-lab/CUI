@@ -166,6 +166,19 @@ bool cui_popover_begin(cui_ctx *ui, const char *id, const cui_popover_opts *o) {
     return cui__popup_begin(ui, pid, anchor, o->placement, o->width, o->pad > 0 ? o->pad : 16, o->gap > 0 ? o->gap : 10, false);
 }
 
+bool cui_popover_begin_at(cui_ctx *ui, const char *id, cui_vec2 point, const cui_popover_opts *o) {
+    cui_popover_opts d;
+    memset(&d, 0, sizeof d);
+    if (!o) o = &d;
+    cui_id pid = cui_make_id(ui, id);
+    cui_popup *p = cui__popup_get(ui, pid, false);
+    if (!p) return false;
+    p->at_mouse = true;
+    p->mouse = point;
+    return cui__popup_begin(ui, pid, 0, o->placement, o->width,
+                            o->pad > 0 ? o->pad : 16, o->gap > 0 ? o->gap : 10, false);
+}
+
 void cui_popover_end(cui_ctx *ui) { cui__popup_end(ui); }
 
 /* ------------------------------------------------------------------------ */

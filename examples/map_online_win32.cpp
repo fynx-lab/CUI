@@ -132,6 +132,8 @@ static DWORD WINAPI worker(void *arg) {
         for (int attempt = 1; attempt <= 3; attempt++) {
             /* Deterministic transport-failure smoke test; no tile HTTP in this mode. */
             const char *fault = j.z >= 0 ? getenv("CUI_MAP_DEMO_TILE_FAULT") : NULL;
+            if (!fault && j.z >= 0 && j.z != (getenv("CUI_MAP_DEMO_BEIJING") ? 7 : 8) &&
+                getenv("CUI_MAP_DEMO_ZOOM_FAULT")) fault = "404";
             if (fault && (!strcmp(fault, "404") || !strcmp(fault, "503") || !strcmp(fault, "0"))) {
                 n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
             } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
@@ -440,6 +442,11 @@ int main(void) {
             }
         }
         cui_ctx *ui = cui_app_ui(app);
+        if (getenv("CUI_MAP_DEMO_ZOOM_PROBE") || getenv("CUI_MAP_DEMO_ZOOM_OUT_PROBE")) {
+            if (d->frame == 399) cui_input_mouse_move(ui, 500, 300);
+            if (d->frame == 400) cui_input_scroll(ui, 0,
+                getenv("CUI_MAP_DEMO_ZOOM_OUT_PROBE") ? -1 : 1);
+        }
         if (getenv("CUI_MAP_DEMO_BENCH") && d->frame >= 649 && d->frame < 750) {
             cui_input_mouse_move(ui, 500 + ((int)(d->frame - 649) % 50), 300);
             if (d->frame == 649) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);

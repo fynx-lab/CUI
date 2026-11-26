@@ -158,6 +158,138 @@ static void check_raster_fallback(const map_fixture_buf *raw, int scale) {
     cui_destroy(off); cui_destroy(ui); cui_sw_destroy(off_sw); cui_sw_destroy(main_sw);
     cui_mvt_tile_destroy(tile);
 }
+typedef struct {
+    cui_mvt_tile *tile; cui_texture parent, child;
+    cui_map_view view; cui_map_result result;
+    int source_requests, target_requests; bool child_ready, parent_ready, all_children;
+} zoom_scene;
+static const cui_mvt_tile *zoom_lookup(void *user, int z, int x, int y) {
+    zoom_scene *s = user;
+    if (z == 0 && x == 0 && y == 0) return s->parent_ready ? s->tile : NULL;
+    return s->child_ready && z == 1 && (s->all_children || (x == 0 && y == 0)) ? s->tile : NULL;
+}
+static cui_texture zoom_image(void *user, int z, int x, int y) {
+    zoom_scene *s = user;
+    if (z == 0 && x == 0 && y == 0) return s->parent_ready ? s->parent : 0;
+    return s->child_ready && z == 1 && (s->all_children || (x == 0 && y == 0)) ? s->child : 0;
+}
+static void zoom_request(void *user, int z, int x, int y) {
+    (void)x; (void)y;
+    zoom_scene *s = user;
+    if (z == 0) s->source_requests++;
+    if (z == 1) s->target_requests++;
+}
+static void zoom_frame(cui_ctx *ui, zoom_scene *s) {
+    cui_map_opts opts = {0}; opts.lookup = zoom_lookup; opts.raster_lookup = zoom_image;
+    static const cui_map_marker marker[] = {{7, 0, 0, "Center"}};
+    opts.markers = marker; opts.marker_count = 1;
+    opts.request = zoom_request; opts.tile_user = s;
+    cui_begin_frame(ui, 1.f/60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL) {
+        s->result = cui_map_ex(ui, "zoom-test", &s->view, &opts);
+    }
+    cui_end_frame(ui);
+}
+static void check_zoom_fallback(const map_fixture_buf *raw) {
+    zoom_scene s = {0}; s.tile = cui_mvt_tile_decode(raw->b, raw->n); s.parent_ready = true;
+    cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_DARK;
+    cui_ctx *ui = cui_create(&desc);
+    cui_sw_renderer *sw = cui_sw_create();
+    CHECK(s.tile && ui && sw);
+    if (s.tile && ui && sw) {
+        cui_renderer_iface iface = cui_sw_iface(sw);
+        cui_set_renderer(ui, &iface); cui_set_viewport(ui, 256, 256, 1);
+        size_t n = 256u * 256 * 4;
+        unsigned char *solid = malloc(n), *screen = malloc(n);
+        CHECK(solid && screen);
+        if (solid && screen) {
+            for (size_t i = 0; i < n; i += 4) {
+                solid[i] = 183; solid[i + 1] = 36; solid[i + 2] = 153; solid[i + 3] = 255;
+            }
+            s.parent = cui_image_create(ui, 256, 256, solid);
+            for (size_t i = 0; i < n; i += 4) {
+                solid[i] = 24; solid[i + 1] = 174; solid[i + 2] = 231; solid[i + 3] = 255;
+            }
+            s.child = cui_image_create(ui, 256, 256, solid);
+            CHECK(s.parent && s.child);
+            zoom_frame(ui, &s); zoom_frame(ui, &s);
+            cui_input_mouse_move(ui, 64, 128); zoom_frame(ui, &s);
+            cui_input_scroll(ui, 0, 1); zoom_frame(ui, &s);
+            CHECK(s.result.view_changed && s.view.zoom == 1);
+            CHECK(fabs(s.view.longitude) < 45);
+            zoom_frame(ui, &s);
+            CHECK(fabs(s.view.longitude) > 0 && fabs(s.view.longitude) < 45);
+            for (int i = 0; i < 14; i++) zoom_frame(ui, &s);
+            CHECK(fabs(s.view.longitude + 45) < 0.1);
+            cui_input_mouse_move(ui, 192, 128); zoom_frame(ui, &s);
+            CHECK(s.result.hovered_marker == 7);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
+            size_t p = ((size_t)220 * 256 + 220) * 4;
+            CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
+            CHECK(s.target_requests > 0 && s.source_requests == 0);
+            s.child_ready = true;
+            zoom_frame(ui, &s);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
+            p = ((size_t)32 * 256 + 32) * 4;
+            CHECK(screen[p] == 24 && screen[p + 1] == 174 && screen[p + 2] == 231);
+            p = ((size_t)220 * 256 + 220) * 4;
+            CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
+            cui_input_scroll(ui, 0, -1); zoom_frame(ui, &s);
+            CHECK(s.view.zoom == 0); /* interrupt animation from current scale */
+            zoom_frame(ui, &s);
+            cui_input_scroll(ui, 0, 1); zoom_frame(ui, &s);
+            CHECK(s.view.zoom == 1); /* retarget without queuing */
+            cui_theme_get(ui)->motion = 0;
+            zoom_frame(ui, &s);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
+            p = ((size_t)220 * 256 + 220) * 4;
+            CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
+            s.view.zoom = 0; s.view.longitude = 179.9;
+            zoom_frame(ui, &s); /* explicit recenter resets the previous anchor */
+            cui_input_mouse_move(ui, 235, 128); zoom_frame(ui, &s);
+            cui_input_scroll(ui, 0, 1); zoom_frame(ui, &s);
+            CHECK(isfinite(s.view.longitude) && s.view.longitude >= -180 && s.view.longitude < 180);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
+            p = ((size_t)200 * 256 + 200) * 4;
+            CHECK(screen[p] == 183 && screen[p + 1] == 36 && screen[p + 2] == 153);
+            cui_image_destroy(ui, s.child); cui_image_destroy(ui, s.parent);
+        }
+        free(solid); free(screen);
+    }
+    cui_destroy(ui); cui_sw_destroy(sw); cui_mvt_tile_destroy(s.tile);
+}
+static void check_zoom_out_fallback(const map_fixture_buf *raw) {
+    zoom_scene s = {0}; s.tile = cui_mvt_tile_decode(raw->b, raw->n);
+    s.view.zoom = 1; s.child_ready = s.all_children = true;
+    cui_ctx_desc desc = {0}; desc.theme = CUI_THEME_DARK;
+    cui_ctx *ui = cui_create(&desc);
+    cui_sw_renderer *sw = cui_sw_create();
+    CHECK(s.tile && ui && sw);
+    if (s.tile && ui && sw) {
+        cui_renderer_iface iface = cui_sw_iface(sw);
+        cui_set_renderer(ui, &iface); cui_set_viewport(ui, 256, 256, 1);
+        size_t n = 256u * 256 * 4;
+        unsigned char *solid = malloc(n), *screen = malloc(n);
+        CHECK(solid && screen);
+        if (solid && screen) {
+            for (size_t i = 0; i < n; i += 4) {
+                solid[i] = 24; solid[i + 1] = 174; solid[i + 2] = 231; solid[i + 3] = 255;
+            }
+            s.child = cui_image_create(ui, 256, 256, solid);
+            zoom_frame(ui, &s); zoom_frame(ui, &s);
+            cui_input_mouse_move(ui, 128, 128); zoom_frame(ui, &s);
+            cui_input_scroll(ui, 0, -1); zoom_frame(ui, &s);
+            for (int i = 0; i < 15; i++) zoom_frame(ui, &s);
+            CHECK(s.view.zoom == 0 && s.source_requests > 0 && s.target_requests == 0);
+            cui_sw_render(sw, cui_get_draw_data(ui), screen, 256, 256, 1024, CUI_SW_RGBA);
+            size_t p = ((size_t)220 * 256 + 220) * 4;
+            CHECK(screen[p] == 24 && screen[p + 1] == 174 && screen[p + 2] == 231);
+            cui_image_destroy(ui, s.child);
+        }
+        free(solid); free(screen);
+    }
+    cui_destroy(ui); cui_sw_destroy(sw); cui_mvt_tile_destroy(s.tile);
+}
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
 }
@@ -258,8 +390,9 @@ int main(int argc, char **argv) {
             CHECK(s.last.view_changed && s.view.longitude != before_key);
             cui_input_key(ui, CUI_KEY_RIGHT, false, 0); frame(ui, &s);
             s.view.longitude = 179.9;
-            frame(ui, &s); CHECK(s.view.longitude <= 180 && s.view.longitude >= -180);
-            s.view.latitude = 90; frame(ui, &s); CHECK(isfinite(s.view.latitude) && s.view.latitude <= 85.05113);
+            frame(ui, &s); CHECK(fabs(s.view.longitude - 179.9) < 0.001);
+            s.view.latitude = 90; frame(ui, &s);
+            CHECK(isfinite(s.view.latitude) && s.view.latitude > 85 && s.view.latitude <= 85.05113);
             cui_destroy(ui);
         }
         cui_mvt_tile_destroy(t);
@@ -292,6 +425,8 @@ int main(int argc, char **argv) {
     map_fixture_buf base_fixture = map_fixture();
     check_raster_fallback(&base_fixture, 1);
     check_raster_fallback(&base_fixture, 2);
+    check_zoom_fallback(&base_fixture);
+    check_zoom_out_fallback(&base_fixture);
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

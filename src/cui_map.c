@@ -276,16 +276,19 @@ void cui_mvt_tile_destroy(cui_mvt_tile *t) {
 /* Scanline spans are prepared once on the decoder worker, not recalculated
  * on every UI frame. Even-odd crossings preserve disjoint rings and holes. */
 static void map_fill(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_feature *f, cui_color color) {
+    float scale = r.w / 256.0f;
     for (int i = 0; i < f->span_count; i++) {
         map_span s = t->spans[f->span_first + i];
-        cui_draw_rect(ui, (cui_rect){r.x + s.left, r.y + s.row, s.right - s.left,
-                                    s.height + 0.02f}, CUI_CORNERS(0), color);
+        cui_draw_rect(ui, (cui_rect){r.x + s.left * scale, r.y + s.row * scale,
+                                    (s.right - s.left) * scale, (s.height + 0.02f) * scale},
+                      CUI_CORNERS(0), color);
     }
 }
-typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y; } map_ref;
+typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; int z; } map_ref;
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
-    int z, count; bool dragging; map_ref refs[MAP_REFS];
+    int z, count, fallback_count; float scale; bool dragging;
+    map_ref refs[MAP_REFS], fallback[MAP_REFS];
 } map_paint;
 static double map_clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
 static double map_world_y(double lat, int z) {
@@ -307,9 +310,10 @@ static void map_road(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_f
         if (path.count < 2 || path.count > 4096) continue;
         for (int k = 0; k < path.count; k++) {
             map_point p = t->points[path.first + k];
-            pts[k] = (cui_vec2){r.x + (float)p.x * 256 / f->extent, r.y + (float)p.y * 256 / f->extent};
+            pts[k] = (cui_vec2){r.x + (float)p.x * r.w / f->extent,
+                                r.y + (float)p.y * r.h / f->extent};
         }
-        cui_draw_polyline(ui, pts, path.count, width, c, false);
+        cui_draw_polyline(ui, pts, path.count, width * (r.w / 256.0f), c, false);
     }
 }
 static void map_draw_base(cui_ctx *ui, const cui_mvt_tile *t, cui_rect r, int z, bool dragging) {
@@ -352,26 +356,39 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     cui_color land = dark ? cui__rgba(38, 46, 52, 255) : cui__rgba(232, 233, 224, 255);
     cui_draw_rect(ui, bounds, CUI_CORNERS(0), land);
     int labels = 0; cui_rect used[MAP_LABELS];
-    double center_x = map_world_x(m->view.longitude, m->z);
-    double center_y = map_world_y(m->view.latitude, m->z);
-    double world_width = 256.0 * (1 << m->z);
+    double center_x = map_world_x(m->view.longitude, m->z) * m->scale;
+    double center_y = map_world_y(m->view.latitude, m->z) * m->scale;
+    double world_width = 256.0 * (1 << m->z) * m->scale;
     /* Reserve marker labels first, so place names never paint underneath them. */
     for (int i = 0; i < m->nmarkers && labels < MAP_LABELS; i++) {
         const cui_map_marker *mark = &m->markers[i];
         if (!mark->label || mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
-        double dx = map_wrap(map_world_x(mark->longitude, m->z) - center_x + world_width / 2, world_width) - world_width / 2;
+        double dx = map_wrap(map_world_x(mark->longitude, m->z) * m->scale - center_x + world_width / 2, world_width) - world_width / 2;
         cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, mark->label, -1);
         used[labels++] = (cui_rect){bounds.x + bounds.w / 2 + (float)dx + 9,
-                                      bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) - center_y) - 7,
+                                      bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) * m->scale - center_y) - 7,
                                       text.width, text.height};
     }
     for (int i = 0; i < m->count; i++) {
         const cui_mvt_tile *t = m->refs[i].tile;
-        cui_rect r = {bounds.x + m->refs[i].x, bounds.y + m->refs[i].y, 256, 256};
+        cui_rect r = {bounds.x + m->refs[i].x, bounds.y + m->refs[i].y, m->refs[i].size, m->refs[i].size};
         if (!t) {
+            bool filled = false;
             cui_push_clip(ui, bounds);
-            cui_draw_rect(ui, r, CUI_CORNERS(0),
-                          dark ? cui__rgba(45, 54, 60, 255) : cui__rgba(224, 227, 218, 255));
+            cui_push_clip(ui, r);
+            for (int j = 0; j < m->fallback_count; j++) {
+                const map_ref *src = &m->fallback[j];
+                cui_rect sr = {bounds.x + src->x, bounds.y + src->y, src->size, src->size};
+                if (sr.x >= r.x + r.w || sr.x + sr.w <= r.x ||
+                    sr.y >= r.y + r.h || sr.y + sr.h <= r.y) continue;
+                if (src->image) cui_draw_image(ui, src->image, sr, (cui_rect){0, 0, 1, 1},
+                                               CUI_CORNERS(0), cui__rgba(255, 255, 255, 255));
+                else if (src->tile) map_draw_base(ui, src->tile, sr, src->z, false);
+                filled = true;
+            }
+            if (!filled) cui_draw_rect(ui, r, CUI_CORNERS(0),
+                                      dark ? cui__rgba(45, 54, 60, 255) : cui__rgba(224, 227, 218, 255));
+            cui_pop_clip(ui);
             cui_pop_clip(ui);
             continue;
         }
@@ -389,7 +406,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             const map_feature *f = &t->features[j];
             if (f->kind != 3 || !f->name[0] || !f->count) continue;
             map_point p = t->points[t->paths[f->first].first];
-            cui_vec2 pos = {ox + (float)p.x * 256 / f->extent, oy + (float)p.y * 256 / f->extent};
+            cui_vec2 pos = {ox + (float)p.x * m->refs[i].size / f->extent,
+                            oy + (float)p.y * m->refs[i].size / f->extent};
             cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
             cui_rect box = {pos.x, pos.y, text.width, text.height};
             if (box.x < bounds.x || box.y < bounds.y || box.x + box.w > bounds.x + bounds.w || box.y + box.h > bounds.y + bounds.h) continue;
@@ -406,16 +424,61 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     for (int i = 0; i < m->nmarkers; i++) {
         const cui_map_marker *mark = &m->markers[i];
         if (mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
-        double dx = map_wrap(map_world_x(mark->longitude, m->z) - cx + world / 2, world) - world / 2;
+        double dx = map_wrap(map_world_x(mark->longitude, m->z) * m->scale - cx + world / 2, world) - world / 2;
         cui_vec2 p = {bounds.x + bounds.w / 2 + (float)dx,
-                      bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) - cy)};
+                      bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) * m->scale - cy)};
         if (p.x < bounds.x - 8 || p.x > bounds.x + bounds.w + 8 || p.y < bounds.y - 8 || p.y > bounds.y + bounds.h + 8) continue;
         cui_draw_circle(ui, p, 6, cui__rgba(255, 255, 255, 255));
         cui_draw_circle(ui, p, 4, CUI_C(ui, ACCENT));
         if (mark->label) cui_draw_text(ui, CUI_FONT_BODY, 12, (cui_vec2){p.x + 9, p.y - 7}, CUI_C(ui, FOREGROUND), mark->label, -1);
     }
 }
-typedef struct { cui_vec2 last; bool down, moved; } map_state;
+typedef struct {
+    cui_vec2 last; bool down, moved, initialized;
+    int target, source, recent;
+    float visual, start, elapsed;
+    double anchor_lon, anchor_lat, last_lon, last_lat;
+    cui_vec2 anchor;
+} map_state;
+static void map_zoom_to(map_state *st, int from, int to, double cx, double cy,
+                        cui_vec2 pointer, cui_rect rect) {
+    if (from == to) return;
+    st->recent = from;
+    double scale = exp2((double)st->visual - from);
+    st->anchor_lon = map_lon(map_wrap((cx + pointer.x - rect.w / 2) / scale,
+                                      256.0 * (1 << from)), from);
+    st->anchor_lat = map_lat(map_clamp((cy + pointer.y - rect.h / 2) / scale,
+                                      0, 256.0 * (1 << from)), from);
+    st->anchor = pointer;
+    st->start = st->visual;
+    st->elapsed = 0;
+    st->target = to;
+}
+/* Read only already-resident source tiles. Never request a non-target zoom. */
+static void map_collect_fallback(map_paint *m, const cui_map_opts *opts, int z, cui_rect rect) {
+    if (z < 0 || z > 20 || z == m->z) return;
+    double scale = ldexp((double)m->scale, m->z - z);
+    double size = 256.0 * scale;
+    if (size < 32) return; /* bound high-zoom child scanning */
+    double cx = map_world_x(m->view.longitude, z) * scale;
+    double cy = map_world_y(m->view.latitude, z) * scale;
+    int minx = (int)floor((cx - rect.w / 2) / size);
+    int maxx = (int)floor((cx + rect.w / 2) / size);
+    int miny = (int)floor((cy - rect.h / 2) / size);
+    int maxy = (int)floor((cy + rect.h / 2) / size);
+    int tiles = 1 << z, first = m->fallback_count;
+    for (int y = miny; y <= maxy && m->fallback_count - first < MAP_REFS / 4; y++) {
+        if (y < 0 || y >= tiles) continue;
+        for (int x = minx; x <= maxx && m->fallback_count - first < MAP_REFS / 4; x++) {
+            int tx = (x % tiles + tiles) % tiles;
+            const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
+            cui_texture image = tile && opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
+            if (!tile && !image) continue;
+            m->fallback[m->fallback_count++] = (map_ref){tile, image,
+                (float)(x * size - cx + rect.w / 2), (float)(y * size - cy + rect.h / 2), (float)size, z};
+        }
+    }
+}
 cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, const cui_map_opts *opts) {
     cui_map_result out = {false, -1, -1};
     if (!ui || !view) return out;
@@ -439,8 +502,30 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     cui_canvas_result r = cui_canvas_ex(ui, idstr ? idstr : "map", w, h, map_paint_fn, m, 0, &canvas);
     if (r.rect.w > 0 && r.rect.h > 0) cui_wheel_region(ui, id, r.rect);
     /* cui_canvas_ex may grow CUI's state array; acquire the state afterward. */
-    map_state *st = cui_state(ui, id, sizeof *st);
-    double cx = map_world_x(view->longitude, z), cy = map_world_y(view->latitude, z);
+    map_state *st = cui_state(ui, id ^ 0x4D41505Au, sizeof *st);
+    if (st->initialized && (fabs(view->longitude - st->last_lon) > 0.000001 ||
+                            fabs(view->latitude - st->last_lat) > 0.000001))
+        st->initialized = false; /* external recenter: do not animate the old area */
+    if (!st->initialized || st->target != z) {
+        st->initialized = true; st->target = st->source = st->recent = z;
+        st->visual = st->start = (float)z; st->elapsed = 0.2f;
+    }
+    float motion = cui_theme_get(ui)->motion;
+    if (motion <= 0) { st->visual = (float)z; st->elapsed = 0.2f; }
+    else if (st->elapsed < 0.2f) {
+        st->elapsed = (float)map_clamp(st->elapsed + cui_delta_time(ui) / motion, 0, 0.2);
+        float t = st->elapsed / 0.2f;
+        float eased = 1 - (1 - t) * (1 - t) * (1 - t);
+        st->visual = st->start + (z - st->start) * eased;
+        if (st->elapsed < 0.2f) cui_request_redraw(ui);
+    }
+    double scale = exp2((double)st->visual - z);
+    double cx = map_world_x(view->longitude, z) * scale;
+    double cy = map_world_y(view->latitude, z) * scale;
+    if (st->elapsed < 0.2f) {
+        cx = map_world_x(st->anchor_lon, z) * scale - st->anchor.x + r.rect.w / 2;
+        cy = map_world_y(st->anchor_lat, z) * scale - st->anchor.y + r.rect.h / 2;
+    }
     if (r.pressed) {
         if (st->down) {
             float dx = r.mouse.x - st->last.x, dy = r.mouse.y - st->last.y;
@@ -455,10 +540,12 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     if (cui_wheel_take(ui, id, &wheel) && wheel.y != 0) {
         int next = (int)map_clamp(z + (wheel.y > 0 ? 1 : -1), lo, hi);
         if (next != z) {
-            double scale = next > z ? 2.0 : 0.5;
-            cx = (cx + r.mouse.x - r.rect.w / 2) * scale - r.mouse.x + r.rect.w / 2;
-            cy = (cy + r.mouse.y - r.rect.h / 2) * scale - r.mouse.y + r.rect.h / 2;
-            z = next; out.view_changed = true;
+            map_zoom_to(st, z, next, cx, cy, r.mouse, r.rect);
+            z = next; scale = exp2((double)st->visual - z);
+            if (motion <= 0) { st->visual = (float)z; st->elapsed = 0.2f; scale = 1; }
+            cx = map_world_x(st->anchor_lon, z) * scale - st->anchor.x + r.rect.w / 2;
+            cy = map_world_y(st->anchor_lat, z) * scale - st->anchor.y + r.rect.h / 2;
+            out.view_changed = true; cui_request_redraw(ui);
         }
     }
     if (cui_focused_id(ui) == id) {
@@ -466,20 +553,37 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
         if (cui_key_pressed(ui, CUI_KEY_RIGHT)) { cx += 64; out.view_changed = true; }
         if (cui_key_pressed(ui, CUI_KEY_UP)) { cy -= 64; out.view_changed = true; }
         if (cui_key_pressed(ui, CUI_KEY_DOWN)) { cy += 64; out.view_changed = true; }
-        if (cui_key_pressed(ui, CUI_KEY_EQUAL) && z < hi) { cx *= 2; cy *= 2; z++; out.view_changed = true; }
-        if (cui_key_pressed(ui, CUI_KEY_MINUS) && z > lo) { cx *= 0.5; cy *= 0.5; z--; out.view_changed = true; }
+        int next = z;
+        if (cui_key_pressed(ui, CUI_KEY_EQUAL) && z < hi) next++;
+        if (cui_key_pressed(ui, CUI_KEY_MINUS) && z > lo) next--;
+        if (next != z) {
+            cui_vec2 center = {r.rect.w / 2, r.rect.h / 2};
+            map_zoom_to(st, z, next, cx, cy, center, r.rect);
+            z = next; scale = exp2((double)st->visual - z);
+            if (motion <= 0) { st->visual = (float)z; st->elapsed = 0.2f; scale = 1; }
+            cx = map_world_x(st->anchor_lon, z) * scale - st->anchor.x + r.rect.w / 2;
+            cy = map_world_y(st->anchor_lat, z) * scale - st->anchor.y + r.rect.h / 2;
+            out.view_changed = true; cui_request_redraw(ui);
+        }
     }
     double world = 256.0 * (1 << z);
-    cx = map_wrap(cx, world); cy = map_clamp(cy, 0, world);
-    view->longitude = map_lon(cx, z); view->latitude = map_lat(cy, z); view->zoom = (float)z;
-    m->view = *view; m->z = z; m->dragging = r.pressed && st->moved;
+    cx = map_wrap(cx, world * scale); cy = map_clamp(cy, 0, world * scale);
+    view->longitude = map_lon(cx / scale, z); view->latitude = map_lat(cy / scale, z);
+    view->zoom = (float)z;
+    if (st->elapsed < 0.2f) {
+        st->anchor_lon = map_lon(map_wrap((cx + st->anchor.x - r.rect.w / 2) / scale, world), z);
+        st->anchor_lat = map_lat(map_clamp((cy + st->anchor.y - r.rect.h / 2) / scale, 0, world), z);
+    }
+    m->view = *view; m->z = z; m->scale = (float)scale;
+    m->dragging = r.pressed && st->moved;
     if (opts) { m->markers = opts->markers; m->nmarkers = opts->markers && opts->marker_count > 0 ? opts->marker_count : 0;
                 if (m->nmarkers > 4096) m->nmarkers = 4096; }
     for (int i = 0; i < m->nmarkers && (r.hovered || r.clicked); i++) {
         const cui_map_marker *mark = &m->markers[i];
         if (mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
-        double dx = map_wrap(map_world_x(mark->longitude, z) - cx + world / 2, world) - world / 2;
-        double x = r.rect.w / 2 + dx, y = r.rect.h / 2 + map_world_y(mark->latitude, z) - cy;
+        double dx = map_wrap(map_world_x(mark->longitude, z) * scale - cx + world * scale / 2,
+                             world * scale) - world * scale / 2;
+        double x = r.rect.w / 2 + dx, y = r.rect.h / 2 + map_world_y(mark->latitude, z) * scale - cy;
         if (fabs(x - r.mouse.x) < 8 && fabs(y - r.mouse.y) < 8) {
             out.hovered_marker = mark->id;
             if (r.clicked && !st->moved) out.clicked_marker = mark->id;
@@ -487,22 +591,56 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
         }
     }
     if (r.rect.w > 0 && r.rect.h > 0 && opts && opts->lookup) {
+        /* Keep geographically matching source tiles alive before target requests
+         * can replace slots. Paint distant levels first so nearer cached detail
+         * wins without requesting any old level. */
+        if (st->source != z || st->recent != z) {
+            int levels[4] = {st->source, st->recent, z - 1, z + 1};
+            for (int i = 0; i < 4; i++) for (int j = i + 1; j < 4; j++)
+                if (abs(levels[i] - z) < abs(levels[j] - z)) {
+                    int tmp = levels[i]; levels[i] = levels[j]; levels[j] = tmp;
+                }
+            for (int i = 0; i < 4; i++) {
+                if (levels[i] < lo || levels[i] > hi || levels[i] == z) continue;
+                bool duplicate = false;
+                for (int j = 0; j < i; j++) if (levels[j] == levels[i]) duplicate = true;
+                if (!duplicate) map_collect_fallback(m, opts, levels[i], r.rect);
+            }
+        }
         int border = r.pressed ? 1 : 0;
-        int minx = (int)floor((cx - r.rect.w / 2) / 256) - border;
-        int maxx = (int)floor((cx + r.rect.w / 2) / 256) + border;
-        int miny = (int)floor((cy - r.rect.h / 2) / 256) - border;
-        int maxy = (int)floor((cy + r.rect.h / 2) / 256) + border;
-        int tiles = 1 << z;
+        double size = 256.0 * scale;
+        int minx = (int)floor((cx - r.rect.w / 2) / size) - border;
+        int maxx = (int)floor((cx + r.rect.w / 2) / size) + border;
+        int miny = (int)floor((cy - r.rect.h / 2) / size) - border;
+        int maxy = (int)floor((cy + r.rect.h / 2) / size) + border;
+        int tiles = 1 << z, missing = 0;
+        double final_cx = st->elapsed < 0.2f ?
+            map_world_x(st->anchor_lon, z) - st->anchor.x + r.rect.w / 2 : cx;
+        double final_cy = st->elapsed < 0.2f ?
+            map_world_y(st->anchor_lat, z) - st->anchor.y + r.rect.h / 2 : cy;
+        final_cx = map_wrap(final_cx, world);
+        final_cy = map_clamp(final_cy, 0, world);
+        int req_minx = (int)floor((final_cx - r.rect.w / 2) / 256) - border;
+        int req_maxx = (int)floor((final_cx + r.rect.w / 2) / 256) + border;
+        int req_miny = (int)floor((final_cy - r.rect.h / 2) / 256) - border;
+        int req_maxy = (int)floor((final_cy + r.rect.h / 2) / 256) + border;
         for (int y = miny; y <= maxy && m->count < MAP_REFS; y++) {
             if (y < 0 || y >= tiles) continue;
             for (int x = minx; x <= maxx && m->count < MAP_REFS; x++) {
                 int tx = (x % tiles + tiles) % tiles;
                 const cui_mvt_tile *tile = opts->lookup(opts->tile_user, z, tx, y);
-                if (!tile) { if (opts->request) opts->request(opts->tile_user, z, tx, y); }
+                if (!tile) {
+                    missing++;
+                    if (opts->request && x >= req_minx && x <= req_maxx &&
+                        y >= req_miny && y <= req_maxy) opts->request(opts->tile_user, z, tx, y);
+                }
                 cui_texture image = tile && opts->raster_lookup ? opts->raster_lookup(opts->tile_user, z, tx, y) : 0;
-                m->refs[m->count++] = (map_ref){tile, image, (float)(x * 256.0 - cx + r.rect.w / 2), (float)(y * 256.0 - cy + r.rect.h / 2)};
+                m->refs[m->count++] = (map_ref){tile, image,
+                    (float)(x * size - cx + r.rect.w / 2), (float)(y * size - cy + r.rect.h / 2), (float)size, z};
             }
         }
+        if (!missing) { st->source = st->recent = z; m->fallback_count = 0; }
     }
+    st->last_lon = view->longitude; st->last_lat = view->latitude;
     return out;
 }

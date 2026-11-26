@@ -442,6 +442,115 @@ static void check_labels_stable_across_pan(void) {
     }
     cui_destroy(ui); cui_mvt_tile_destroy(tile);
 }
+/* Synthetic z13/z14 source: the optional POI layer intentionally precedes
+ * base place geometry, and its crowded variant exceeds the POI candidate cap. */
+static cui_mvt_tile *detailed_names_tile(bool crowded, int only_layer) {
+    static const char *layers[] = {"poi", "transportation_name", "water_name",
+                                   "park", "mountain_peak", "waterway", "place"};
+    static const char *names[] = {"Cafe \xe5\x8c\x97\xe4\xba\xac", "Cedar Road", "Canal", "Green Park",
+                                  "Summit", "Stream", "Town"};
+    long_pb tile = {{0}, 0}, layer = {{0}, 0}, feature = {{0}, 0};
+    long_pb geom = {{0}, 0}, tags = {{0}, 0}, value = {{0}, 0};
+    long_var(&tags, 0); long_var(&tags, 0);
+    for (int i = 0; i < 7; i++) {
+        if (only_layer >= 0 && i != only_layer) continue;
+        layer.n = feature.n = geom.n = value.n = 0;
+        if (i == 1 || i == 2 || i == 5) {
+            long_var(&geom, 9); long_coord(&geom, 500); long_coord(&geom, 600 + i * 480);
+            long_var(&geom, 10); long_coord(&geom, 2200); long_coord(&geom, 0);
+        } else if (i == 3) {
+            long_var(&geom, 9); long_coord(&geom, 2200); long_coord(&geom, 2400);
+            long_var(&geom, 26); long_coord(&geom, 900); long_coord(&geom, 0);
+            long_coord(&geom, 0); long_coord(&geom, 900);
+            long_coord(&geom, -900); long_coord(&geom, 0);
+            long_var(&geom, 15);
+        } else {
+            long_var(&geom, 9); long_coord(&geom, 900 + i * 300); long_coord(&geom, 700 + i * 440);
+        }
+        long_nested(&feature, 2, tags.b, tags.n);
+        long_field(&feature, 3, i == 3 ? 3 : (i == 1 || i == 2 || i == 5 ? 2 : 1));
+        long_nested(&feature, 4, geom.b, geom.n);
+        long_nested(&layer, 1, layers[i], strlen(layers[i]));
+        int n = crowded && i == 0 ? 2049 : 1;
+        for (int j = 0; j < n; j++) long_nested(&layer, 2, feature.b, feature.n);
+        long_nested(&layer, 3, "name", 4);
+        long_nested(&value, 1, names[i], strlen(names[i]));
+        long_nested(&layer, 4, value.b, value.n);
+        long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
+        long_nested(&tile, 3, layer.b, layer.n);
+    }
+    return cui_mvt_tile_decode(tile.b, tile.n);
+}
+static const cui_mvt_tile *detailed_lookup(void *user, int z, int x, int y) {
+    (void)x; (void)y;
+    return z == 12 || z == 13 ? (const cui_mvt_tile *)user : NULL;
+}
+static int detailed_text_vertices(const cui_mvt_tile *tile, int zoom) {
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_DARK});
+    if (!ui) return -1;
+    cui_set_viewport(ui, 600, 600, 1);
+    cui_map_view view = {0, 0, (float)zoom};
+    cui_map_opts opts = {0}; opts.lookup = detailed_lookup; opts.tile_user = (void *)tile;
+    for (int i = 0; i < 2; i++) {
+        cui_begin_frame(ui, 1.f / 60);
+        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+            cui_map_ex(ui, "detailed-names", &view, &opts);
+        cui_end_frame(ui);
+    }
+    const cui_draw_data *draw = cui_get_draw_data(ui);
+    int count = 0;
+    for (int i = 0; i < draw->vertex_count; i++)
+        if (draw->vertices[i].mode == CUI_SHADE_TEXT) count++;
+    cui_destroy(ui);
+    return count;
+}
+static void check_detailed_names(void) {
+    cui_mvt_tile *tile = detailed_names_tile(false, -1), *crowded = detailed_names_tile(true, -1);
+    CHECK(tile != NULL && crowded != NULL);
+    if (tile && crowded) {
+        int old_text = detailed_text_vertices(tile, 12);
+        int detailed_text = detailed_text_vertices(tile, 13);
+        CHECK(old_text > 0 && detailed_text > old_text);
+        CHECK(detailed_text_vertices(crowded, 13) >= detailed_text);
+    }
+    cui_mvt_tile_destroy(tile); cui_mvt_tile_destroy(crowded);
+    for (int i = 0; i < 6; i++) {
+        cui_mvt_tile *single = detailed_names_tile(false, i);
+        CHECK(single != NULL);
+        if (single) {
+            int old_text = detailed_text_vertices(single, 12);
+            int new_text = detailed_text_vertices(single, 13);
+            CHECK(old_text == 0 && new_text > 0);
+        }
+        cui_mvt_tile_destroy(single);
+    }
+}
+/* Optional name tables over their bound are ignored, not mistaken for a
+ * malformed base tile; keep a normal place layer after the oversized POI. */
+static void check_optional_label_table_overflow(void) {
+    long_pb layer = {{0}, 0}, tile = {{0}, 0}, geom = {{0}, 0};
+    long_pb feature = {{0}, 0}, tags = {{0}, 0}, value = {{0}, 0};
+    long_nested(&layer, 1, "poi", 3);
+    for (int i = 0; i <= 16384; i++) long_nested(&layer, 2, "", 0);
+    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
+    long_nested(&tile, 3, layer.b, layer.n);
+    layer.n = 0;
+    long_var(&tags, 0); long_var(&tags, 0);
+    long_var(&geom, 9); long_coord(&geom, 2048); long_coord(&geom, 2048);
+    long_nested(&feature, 2, tags.b, tags.n);
+    long_field(&feature, 3, 1); long_nested(&feature, 4, geom.b, geom.n);
+    long_nested(&layer, 1, "place", 5);
+    long_nested(&layer, 2, feature.b, feature.n);
+    long_nested(&layer, 3, "name", 4);
+    long_nested(&value, 1, "Town", 4);
+    long_nested(&layer, 4, value.b, value.n);
+    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
+    long_nested(&tile, 3, layer.b, layer.n);
+    cui_mvt_tile *decoded = cui_mvt_tile_decode(tile.b, tile.n);
+    CHECK(decoded != NULL);
+    if (decoded) CHECK(detailed_text_vertices(decoded, 12) > 0);
+    cui_mvt_tile_destroy(decoded);
+}
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
 }
@@ -589,6 +698,8 @@ int main(int argc, char **argv) {
     check_zoom_out_fallback(&base_fixture);
     check_labels_cover_large_view();
     check_labels_stable_across_pan();
+    check_detailed_names();
+    check_optional_label_table_overflow();
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

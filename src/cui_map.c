@@ -9,16 +9,19 @@
 enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
        MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 16384,
        MAP_VALUES = 32768,
-       MAP_SPANS = 100000, MAP_REFS = 256, MAP_LABEL_COLS = 12,
-       MAP_LABEL_ROWS = 8, MAP_LABELS = MAP_LABEL_COLS * MAP_LABEL_ROWS * 2,
+       MAP_SPANS = 100000, MAP_REFS = 256,
+       MAP_LABELS = 256, MAP_LABELS_LOW = 192,
        MAP_LABEL_CELL = 192, MAP_LABEL_CELL_SLOTS = 512,
+       MAP_POI_CANDIDATES = 2048, MAP_ROAD_NAME_CANDIDATES = 512,
+       MAP_WATER_NAME_CANDIDATES = 256, MAP_PARK_CANDIDATES = 128,
+       MAP_PEAK_CANDIDATES = 128, MAP_WATERWAY_CANDIDATES = 256,
        MAP_CROSSINGS = 2048 };
 typedef struct { const uint8_t *p; size_t n; } map_slice;
 typedef struct { const uint8_t *p, *end; } map_pb;
 typedef struct { int32_t x, y; } map_point;
 typedef struct { int first, count; } map_path;
 typedef struct { float left, right; uint16_t row, height; } map_span;
-typedef struct { int kind, first, count, extent, span_first, span_count; char name[96], class_name[32]; } map_feature;
+typedef struct { int kind, first, count, extent, span_first, span_count; map_point anchor; char name[96], class_name[32]; } map_feature;
 struct cui_mvt_tile {
     uint8_t *bytes;
     size_t byte_count;
@@ -28,6 +31,7 @@ struct cui_mvt_tile {
     map_span *spans;
     int nfeatures, npaths, npoints, nspans;
     int cfeatures, cpaths, cpoints, cspans;
+    bool geometry_limit_hit;
 };
 
 static bool map_var(map_pb *p, uint64_t *out) {
@@ -82,10 +86,12 @@ static bool map_grow(void **p, int *cap, int needed, int limit, size_t stride) {
     *p = next; *cap = count; return true;
 }
 static bool map_add_point(cui_mvt_tile *t, int32_t x, int32_t y) {
+    if (t->npoints == MAP_POINTS) { t->geometry_limit_hit = true; return false; }
     if (!map_grow((void **)&t->points, &t->cpoints, t->npoints + 1, MAP_POINTS, sizeof *t->points)) return false;
     t->points[t->npoints++] = (map_point){x, y}; return true;
 }
 static bool map_add_path(cui_mvt_tile *t) {
+    if (t->npaths == MAP_PATHS) { t->geometry_limit_hit = true; return false; }
     if (!map_grow((void **)&t->paths, &t->cpaths, t->npaths + 1, MAP_PATHS, sizeof *t->paths)) return false;
     t->paths[t->npaths++] = (map_path){t->npoints, 0}; return true;
 }
@@ -120,6 +126,40 @@ static bool map_geometry(cui_mvt_tile *t, map_slice data, int type, map_feature 
     }
     f->count = t->npaths - f->first;
     return f->count > 0 && (type != 3 || closed);
+}
+static map_point map_name_anchor(const cui_mvt_tile *t, const map_feature *f, int type) {
+    map_path first = t->paths[f->first];
+    map_point anchor = t->points[first.first];
+    if (type == 1) return anchor;
+    if (type == 2) {
+        int64_t longest = -1;
+        for (int j = 0; j < f->count; j++) {
+            map_path path = t->paths[f->first + j];
+            for (int k = 1; k < path.count; k++) {
+                map_point a = t->points[path.first + k - 1], b = t->points[path.first + k];
+                int64_t dx = (int64_t)b.x - a.x, dy = (int64_t)b.y - a.y;
+                int64_t length = dx * dx + dy * dy;
+                if (length > longest) {
+                    longest = length;
+                    anchor = (map_point){(int32_t)(((int64_t)a.x + b.x) / 2),
+                                         (int32_t)(((int64_t)a.y + b.y) / 2)};
+                }
+            }
+        }
+    } else if (type == 3) {
+        int32_t left = anchor.x, right = anchor.x, top = anchor.y, bottom = anchor.y;
+        for (int j = 0; j < f->count; j++) {
+            map_path path = t->paths[f->first + j];
+            for (int k = 0; k < path.count; k++) {
+                map_point p = t->points[path.first + k];
+                if (p.x < left) left = p.x; if (p.x > right) right = p.x;
+                if (p.y < top) top = p.y; if (p.y > bottom) bottom = p.y;
+            }
+        }
+        anchor = (map_point){(int32_t)(((int64_t)left + right) / 2),
+                             (int32_t)(((int64_t)top + bottom) / 2)};
+    }
+    return anchor;
 }
 static bool map_value(map_slice encoded, map_slice *out) {
     map_pb p = {encoded.p, encoded.p + encoded.n};
@@ -158,12 +198,16 @@ static bool map_feature_parse(cui_mvt_tile *t, map_slice data, int kind, int ext
     if ((kind == 1 || kind == 4) && type != 3) return true;
     if ((kind == 2 || kind == 5) && type != 2) return true;
     if (kind == 3 && type != 1) return true;
+    /* Optional name layers can supply a point or line for the same kind of
+     * feature (observed at z13/z14); anchor by actual geometry, not layer. */
+    if (kind >= 6 && !f.name[0]) return true;
     if (!map_grow((void **)&t->features, &t->cfeatures, t->nfeatures + 1, MAP_FEATURES, sizeof *t->features)) return false;
     if (!map_geometry(t, geom, type, &f)) return false;
+    if (f.name[0] && (kind == 3 || kind >= 5)) f.anchor = map_name_anchor(t, &f, type);
     t->features[t->nfeatures++] = f;
     return true;
 }
-static bool map_layer(cui_mvt_tile *t, map_slice encoded) {
+static bool map_layer(cui_mvt_tile *t, map_slice encoded, bool optional_pass) {
     map_pb p = {encoded.p, encoded.p + encoded.n};
     map_slice name = {0}; int extent = 4096, version = 1;
     /* Discover the layer first: unknown provider/schema layers are skipped
@@ -179,25 +223,56 @@ static bool map_layer(cui_mvt_tile *t, map_slice encoded) {
     if (version != 2 || !name.p) return false;
     int kind = map_eq(name, "water") ? 1 : map_eq(name, "transportation") ? 2 :
                map_eq(name, "place") ? 3 : map_eq(name, "landcover") ? 4 :
-               map_eq(name, "waterway") ? 5 : 0;
-    if (!kind) return true;
+               map_eq(name, "waterway") ? 5 : map_eq(name, "poi") ? 6 :
+               map_eq(name, "transportation_name") ? 7 : map_eq(name, "water_name") ? 8 :
+               map_eq(name, "park") ? 9 : map_eq(name, "mountain_peak") ? 10 : 0;
+    if (!kind || (kind >= 6) != optional_pass) return true;
     map_slice *fields = malloc((2 * MAP_FIELDS + MAP_VALUES) * sizeof *fields);
     if (!fields) return false;
     map_slice *features = fields, *keys = fields + MAP_FIELDS, *values = fields + 2 * MAP_FIELDS;
-    int nf = 0, nk = 0, nv = 0; bool ok = true;
+    int nf = 0, nk = 0, nv = 0; bool ok = true, overflow = false;
+    bool optional = kind >= 6;
     p = (map_pb){encoded.p, encoded.p + encoded.n};
     while (p.p < p.end) {
         unsigned id, wire; map_slice v;
         if (!map_field(&p, &id, &wire)) { ok = false; break; }
-        if (id == 2 && wire == 2) { if (nf == MAP_FIELDS || !map_bytes(&p, &features[nf++])) { ok = false; break; } }
-        else if (id == 3 && wire == 2) { if (nk == MAP_FIELDS || !map_bytes(&p, &keys[nk++])) { ok = false; break; } }
-        else if (id == 4 && wire == 2) {
-            if (nv == MAP_VALUES || !map_bytes(&p, &v) || !map_value(v, &values[nv++])) { ok = false; break; }
-        }
-        else if (!map_skip(&p, wire)) { ok = false; break; }
+        if (id == 2 && wire == 2) {
+            if (!map_bytes(&p, &v)) { ok = false; break; }
+            if (nf < MAP_FIELDS && !overflow) features[nf++] = v;
+            else if (optional) overflow = true;
+            else { ok = false; break; }
+        } else if (id == 3 && wire == 2) {
+            if (!map_bytes(&p, &v)) { ok = false; break; }
+            if (nk < MAP_FIELDS && !overflow) keys[nk++] = v;
+            else if (optional) overflow = true;
+            else { ok = false; break; }
+        } else if (id == 4 && wire == 2) {
+            if (!map_bytes(&p, &v)) { ok = false; break; }
+            if (nv < MAP_VALUES && !overflow) {
+                if (!map_value(v, &values[nv++])) { ok = false; break; }
+            } else if (optional) overflow = true;
+            else { ok = false; break; }
+        } else if (!map_skip(&p, wire)) { ok = false; break; }
     }
-    if (ok) for (int i = 0; i < nf; i++)
-        if (!map_feature_parse(t, features[i], kind, extent, keys, nk, values, nv)) { ok = false; break; }
+    int cap = kind == 6 ? MAP_POI_CANDIDATES : kind == 7 ? MAP_ROAD_NAME_CANDIDATES :
+              kind == 8 ? MAP_WATER_NAME_CANDIDATES : kind == 9 ? MAP_PARK_CANDIDATES :
+              kind == 10 ? MAP_PEAK_CANDIDATES : MAP_FEATURES;
+    if (ok && !overflow) {
+        int retained = 0;
+        for (int i = 0; i < nf; i++) {
+            if (optional && (retained >= cap || t->nfeatures >= MAP_FEATURES)) break;
+            int before = t->nfeatures, points = t->npoints, paths = t->npaths;
+            if (!map_feature_parse(t, features[i], kind, extent, keys, nk, values, nv)) {
+                if (optional && t->geometry_limit_hit) {
+                    t->nfeatures = before; t->npoints = points; t->npaths = paths;
+                    t->geometry_limit_hit = false;
+                    break; /* optional names cannot crowd out valid base layers */
+                }
+                ok = false; break;
+            }
+            retained += t->nfeatures - before;
+        }
+    }
     free(fields);
     return ok;
 }
@@ -249,13 +324,19 @@ cui_mvt_tile *cui_mvt_tile_decode(const void *bytes, size_t size) {
     if (!t->bytes) { cui_mvt_tile_destroy(t); return NULL; }
     memcpy(t->bytes, bytes, size);
     t->byte_count = size;
-    map_pb p = {t->bytes, t->bytes + size}; int layers = 0;
-    while (p.p < p.end) {
-        unsigned id, wire; map_slice layer;
-        if (!map_field(&p, &id, &wire)) goto bad;
-        if (id == 3 && wire == 2) {
-            if (++layers > 64 || !map_bytes(&p, &layer) || !map_layer(t, layer)) goto bad;
-        } else if (!map_skip(&p, wire)) goto bad;
+    int layers = 0;
+    /* Base geometry must claim its bounded capacity before optional names,
+     * regardless of the provider's layer order in the PBF. */
+    for (int pass = 0; pass < 2; pass++) {
+        map_pb p = {t->bytes, t->bytes + size};
+        while (p.p < p.end) {
+            unsigned id, wire; map_slice layer;
+            if (!map_field(&p, &id, &wire)) goto bad;
+            if (id == 3 && wire == 2) {
+                if ((pass == 0 && ++layers > 64) || !map_bytes(&p, &layer) ||
+                    !map_layer(t, layer, pass == 1)) goto bad;
+            } else if (!map_skip(&p, wire)) goto bad;
+        }
     }
     if (!layers) goto bad;
     for (int i = 0; i < t->nfeatures; i++)
@@ -370,15 +451,24 @@ void cui_map_tile_draw_base_styled(cui_ctx *ui, const cui_mvt_tile *tile, cui_re
 void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect, int zoom) {
     cui_map_tile_draw_base_styled(ui, tile, rect, zoom, NULL);
 }
+static int map_label_group(int kind, int zoom) {
+    if (kind == 3) return 0; /* place */
+    if (zoom < 13) return -1;
+    if (kind == 7) return 1; /* transportation_name */
+    if (kind == 5 || kind == 8 || kind == 9 || kind == 10) return 2; /* water and landmarks */
+    if (kind == 6) return 3; /* POI */
+    return -1;
+}
 static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
     map_paint *m = data;
     cui_draw_rect(ui, bounds, CUI_CORNERS(0), m->palette.land);
-    int labels = 0; cui_rect used[MAP_LABELS];
+    int labels = 0, max_labels = m->z >= 13 ? MAP_LABELS : MAP_LABELS_LOW;
+    cui_rect used[MAP_LABELS];
     double center_x = map_world_x(m->view.longitude, m->z) * m->scale;
     double center_y = map_world_y(m->view.latitude, m->z) * m->scale;
     double world_width = 256.0 * (1 << m->z) * m->scale;
     /* Reserve marker labels first, so place names never paint underneath them. */
-    for (int i = 0; i < m->nmarkers && labels < MAP_LABELS; i++) {
+    for (int i = 0; i < m->nmarkers && labels < max_labels; i++) {
         const cui_map_marker *mark = &m->markers[i];
         if (!mark->label || mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
         double dx = map_wrap(map_world_x(mark->longitude, m->z) * m->scale - center_x + world_width / 2, world_width) - world_width / 2;
@@ -415,21 +505,29 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_pop_clip(ui);
         } else map_draw_base(ui, t, r, m->z, m->dragging, &m->palette);
     }
-    /* Cells follow tile/world coordinates, not the viewport. An interior
-     * place keeps its cell while panning instead of losing its quota whenever
-     * an invisible screen-grid line passes over it. One per cell first, then
-     * a second pass for density; collision and the global cap remain live. */
+    /* World-anchored cell quotas and priority groups prevent dense POI layers
+     * from hiding places and roads. One accepted name per group/cell at high
+     * zoom, at most three groups per cell. Low zoom keeps its two place passes. */
     uint64_t cell_keys[MAP_LABEL_CELL_SLOTS] = {0};
     unsigned char cell_counts[MAP_LABEL_CELL_SLOTS] = {0};
-    if (bounds.w > 0 && bounds.h > 0) for (int pass = 0; pass < 2 && labels < MAP_LABELS; pass++) {
-        for (int i = 0; i < m->count && labels < MAP_LABELS; i++) {
+    unsigned char cell_groups[MAP_LABEL_CELL_SLOTS] = {0};
+    int groups = m->z >= 13 ? 4 : 1;
+    if (bounds.w > 0 && bounds.h > 0) for (int group = 0; group < groups && labels < max_labels; group++) {
+        /* Preserve room for roads, landmarks and POIs even when places are
+         * very dense. Empty higher-priority groups surrender their slots. */
+        int ceiling = groups == 1 ? max_labels : group == 0 ? max_labels - 128 :
+                      group == 1 ? max_labels - 80 : group == 2 ? max_labels - 48 : max_labels;
+        for (int pass = 0; pass < (groups == 1 ? 2 : 1) && labels < ceiling; pass++) {
+        for (int i = 0; i < m->count && labels < ceiling; i++) {
             const cui_mvt_tile *t = m->refs[i].tile;
             if (!t) continue;
             float ox = bounds.x + m->refs[i].x, oy = bounds.y + m->refs[i].y;
-            for (int j = 0; j < t->nfeatures && labels < MAP_LABELS; j++) {
+            int waterways = 0;
+            for (int j = 0; j < t->nfeatures && labels < ceiling; j++) {
                 const map_feature *f = &t->features[j];
-                if (f->kind != 3 || !f->name[0] || !f->count) continue;
-                map_point p = t->points[t->paths[f->first].first];
+                if (!f->name[0] || !f->count || map_label_group(f->kind, m->z) != group) continue;
+                if (f->kind == 5 && ++waterways > MAP_WATERWAY_CANDIDATES) continue;
+                map_point p = f->anchor;
                 cui_vec2 pos = {ox + (float)p.x * m->refs[i].size / f->extent,
                                 oy + (float)p.y * m->refs[i].size / f->extent};
                 if (pos.x < bounds.x || pos.y < bounds.y ||
@@ -442,7 +540,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                 unsigned cell = (unsigned)(key ^ (key >> 32)) * 2654435761u & (MAP_LABEL_CELL_SLOTS - 1);
                 while (cell_counts[cell] && cell_keys[cell] != key)
                     cell = (cell + 1) & (MAP_LABEL_CELL_SLOTS - 1);
-                if (cell_counts[cell] > pass) continue;
+                if (groups == 1 ? cell_counts[cell] > pass :
+                    cell_counts[cell] >= 3 || (cell_groups[cell] & (1u << group))) continue;
                 cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, f->name, -1);
                 cui_rect box = {pos.x, pos.y, text.width, text.height};
                 if (box.x + box.w > bounds.x + bounds.w || box.y + box.h > bounds.y + bounds.h) continue;
@@ -451,10 +550,12 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                 if (!overlap) {
                     cell_keys[cell] = key;
                     cell_counts[cell]++;
+                    cell_groups[cell] |= (unsigned char)(1u << group);
                     used[labels++] = box;
                     cui_draw_text(ui, CUI_FONT_BODY, 12, pos, m->palette.place_text, f->name, -1);
                 }
             }
+        }
         }
     }
     double cx = center_x, cy = center_y;

@@ -33,6 +33,7 @@ typedef struct {
     map_host_proxy_mode network_mode;
     wchar_t manual_proxy[260];
     uint64_t network_epoch;
+    bool cache_maintenance;
 #endif
     map_disk_cache *disk;
     job jobs[QUEUE]; int jhead, jtail, jcount;
@@ -145,6 +146,14 @@ static DWORD WINAPI worker(void *arg) {
         WaitForSingleObject(d->available, INFINITE);
         EnterCriticalSection(&d->lock);
         if (d->stopping) { LeaveCriticalSection(&d->lock); return 0; }
+#ifdef CUI_MAP_HOST_LIBRARY
+        if (d->cache_maintenance) {
+            d->cache_maintenance = false;
+            LeaveCriticalSection(&d->lock);
+            if (d->disk) d->disk->trim();
+            continue;
+        }
+#endif
         if (!d->jcount) { ResetEvent(d->available); LeaveCriticalSection(&d->lock); continue; }
         job j = d->jobs[d->jhead]; d->jhead = (d->jhead + 1) % QUEUE; d->jcount--;
 #ifdef CUI_MAP_HOST_LIBRARY
@@ -448,7 +457,11 @@ static void pump(demo *d) {
                     raster_invalidate(d);
                     EnterCriticalSection(&d->lock);
                     d->jhead = d->jtail; d->jcount = 0;
+#ifdef CUI_MAP_HOST_LIBRARY
+                    if (!d->cache_maintenance) ResetEvent(d->available);
+#else
                     ResetEvent(d->available);
+#endif
                     LeaveCriticalSection(&d->lock);
                     d->failures = 0;
                 }
@@ -813,8 +826,8 @@ static void copy_connection(demo *d, const map_host_connection &connection) {
                (wcslen(connection.manual_proxy) + 1) * sizeof(wchar_t));
 }
 map_host_win32 *map_host_create(cui_ctx *ui, void *native_window,
-                                const map_host_connection &connection) {
-    if (!valid_connection(connection)) return NULL;
+                                const map_host_connection &connection, const map_host_cache &cache) {
+    if (!cache.root || !*cache.root || !cache.max_bytes || !valid_connection(connection)) return NULL;
     demo *d = static_cast<demo *>(calloc(1, sizeof *d));
     if (!d) return NULL;
     InitializeCriticalSection(&d->lock);
@@ -837,7 +850,8 @@ map_host_win32 *map_host_create(cui_ctx *ui, void *native_window,
         cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
         d->raster_ui = NULL; d->raster_sw = NULL;
     }
-    d->disk = new (std::nothrow) map_disk_cache();
+    d->disk = new (std::nothrow) map_disk_cache(cache.root, cache.max_bytes);
+    d->cache_maintenance = true;
     /* A previously validated, size-bounded TileJSON lets cached tiles draw
      * immediately. Refresh the metadata in the background; pump() replaces
      * the source and invalidates old tiles if the provider version changed. */
@@ -867,6 +881,15 @@ map_host_win32 *map_host_create(cui_ctx *ui, void *native_window,
     d->refreshing = true;
     return reinterpret_cast<map_host_win32 *>(d);
 }
+void map_host_set_cache_limit(map_host_win32 *host, uint64_t max_bytes) {
+    if (!host || !max_bytes) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    if (d->disk) d->disk->set_budget(max_bytes);
+    EnterCriticalSection(&d->lock);
+    d->cache_maintenance = true;
+    SetEvent(d->available);
+    LeaveCriticalSection(&d->lock);
+}
 void map_host_begin_frame(map_host_win32 *host) {
     if (!host) return;
     demo *d = reinterpret_cast<demo *>(host);
@@ -894,7 +917,7 @@ void map_host_end_frame(map_host_win32 *host) {
     demo *d = reinterpret_cast<demo *>(host);
     EnterCriticalSection(&d->lock);
     map_demo_cancel_stale(d->tiles, SLOTS, d->jobs, QUEUE, d->jhead, d->jtail, d->jcount, d->frame);
-    if (!d->jcount) ResetEvent(d->available);
+    if (!d->jcount && !d->cache_maintenance) ResetEvent(d->available);
     LeaveCriticalSection(&d->lock);
     for (int i = 0; i < SLOTS; ++i) {
         slot *s = &d->tiles[i];
@@ -916,7 +939,7 @@ void map_host_pause(map_host_win32 *host) {
     d->paused = true;
     ++d->network_epoch; /* in-flight metadata has no slot token; reject it on resume */
     d->jhead = d->jtail; d->jcount = 0;
-    ResetEvent(d->available);
+    if (!d->cache_maintenance) ResetEvent(d->available);
     while (d->rcount) {
         result *r = &d->results[d->rhead];
         free(r->json); cui_mvt_tile_destroy(r->tile);
@@ -960,7 +983,7 @@ bool map_host_set_connection(map_host_win32 *host, const map_host_connection &co
     ++d->network_epoch;
     copy_connection(d, connection);
     d->jhead = d->jtail; d->jcount = 0;
-    ResetEvent(d->available);
+    if (!d->cache_maintenance) ResetEvent(d->available);
     d->refreshing = false;
     bool paused = d->paused;
     LeaveCriticalSection(&d->lock);

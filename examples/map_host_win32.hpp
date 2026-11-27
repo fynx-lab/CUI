@@ -1,5 +1,6 @@
 #pragma once
 #include <cui/cui.h>
+#include <cstdint>
 
 /* Experimental Windows host adapter built from the online example's proven
  * TileJSON/WinHTTP/cache engine. Core CUI remains transport-independent. */
@@ -9,7 +10,10 @@ struct map_host_connection {
     map_host_proxy_mode mode;
     const wchar_t *manual_proxy; /* validated host:port; copied before returning */
 };
-map_host_win32 *map_host_create(cui_ctx *ui, void *native_window, const map_host_connection &connection);
+struct map_host_cache { const wchar_t *root; uint64_t max_bytes; }; /* copied on creation */
+map_host_win32 *map_host_create(cui_ctx *ui, void *native_window, const map_host_connection &connection,
+                                const map_host_cache &cache);
+void map_host_set_cache_limit(map_host_win32 *host, uint64_t max_bytes); /* UI thread, nonblocking */
 // Call on the UI thread. Queued work is canceled; already-running requests remain bounded.
 bool map_host_set_connection(map_host_win32 *host, const map_host_connection &connection);
 void map_host_begin_frame(map_host_win32 *host);

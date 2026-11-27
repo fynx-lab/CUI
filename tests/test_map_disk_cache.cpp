@@ -80,6 +80,50 @@ int main(void) {
         std::string oversized(2u * 1024u * 1024u + 1, 'x');
         CHECK(!restarted.write_tile(source_a, 7, 12, 19, oversized.data(), oversized.size()));
     }
+    {
+        const std::wstring bounded_root = root + L"\\bounded\\nested\\v1";
+        const char *json = "{\"tiles\":[\"https://tiles.openfreemap.org/planet/202611/{z}/{x}/{y}.pbf\"]}";
+        map_disk_cache bounded(bounded_root, 12);
+        CHECK(bounded.write_tilejson(json, strlen(json)));
+        CHECK(bounded.write_tile(source_a, 7, 12, 19, "aaaaaa", 6));
+        Sleep(20);
+        CHECK(bounded.write_tile(source_a, 7, 12, 20, "bbbbbb", 6));
+        Sleep(20);
+        bounded.touch_tile(source_a, 7, 12, 19);
+        Sleep(20);
+        CHECK(bounded.write_tile(source_a, 7, 12, 21, "cccccc", 6));
+        std::string bytes;
+        CHECK(!bounded.read_tile(source_a, 7, 12, 20, bytes)); /* least recently used */
+        CHECK(bounded.read_tile(source_a, 7, 12, 19, bytes));
+        CHECK(bounded.read_tile(source_a, 7, 12, 21, bytes));
+        bounded.set_budget(6);
+        bounded.trim();
+        CHECK(bounded.read_tilejson(bytes)); /* metadata is not evicted */
+        CHECK(!bounded.read_tile(source_a, 7, 12, 19, bytes));
+        CHECK(bounded.read_tile(source_a, 7, 12, 21, bytes));
+        map_disk_cache restarted(bounded_root, 6);
+        restarted.trim();
+        CHECK(restarted.read_tile(source_a, 7, 12, 21, bytes));
+        CHECK(restarted.write_tile(source_a, 7, 12, 22, "dddddd", 6));
+        CHECK(!restarted.read_tile(source_a, 7, 12, 21, bytes));
+        CHECK(restarted.read_tile(source_a, 7, 12, 22, bytes));
+        restarted.set_budget(64);
+        std::atomic<int> bounded_failures(0);
+        std::vector<std::thread> bounded_writers;
+        for (int i = 0; i < 4; ++i) bounded_writers.emplace_back([&restarted, &bounded_failures, source_a, i]() {
+            if (!restarted.write_tile(source_a, 7, 12, 23 + i, "ffffff", 6)) ++bounded_failures;
+        });
+        for (auto &thread : bounded_writers) thread.join();
+        CHECK(bounded_failures.load() == 0);
+        for (int i = 0; i < 4; ++i)
+            CHECK(restarted.read_tile(source_a, 7, 12, 23 + i, bytes));
+        map_disk_cache restarted_smaller(bounded_root, 6);
+        restarted_smaller.trim(); /* inventory and prune tiles from a previous session */
+        int survivors = 0;
+        for (int i = 22; i < 27; ++i)
+            if (restarted_smaller.read_tile(source_a, 7, 12, i, bytes)) ++survivors;
+        CHECK(survivors == 1);
+    }
     clear_directory(root);
     return failures ? 1 : 0;
 }

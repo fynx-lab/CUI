@@ -5,6 +5,9 @@
 #include <cui/cui_app.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #define MAX_TASKS 200
 
@@ -53,6 +56,27 @@ static bool add_task(app_state *a) {
 
 static void frame(cui_ctx *ui, void *user) {
     app_state *a = user;
+#if defined(_WIN32)
+    static bool font_ready;
+    if (!font_ready) {
+        /* The bundled Latin fonts need a CJK fallback to show IME commits. */
+        font_ready = true;
+        char path[MAX_PATH];
+        UINT n = GetWindowsDirectoryA(path, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            const char *names[] = {"msyh.ttc", "simsun.ttc"};
+            for (int i = 0; i < 2; i++) {
+                int written = snprintf(path + n, MAX_PATH - n, "/Fonts/%s", names[i]);
+                if (written < 0 || (size_t)written >= MAX_PATH - n) break;
+                cui_font cjk = cui_font_load_file(ui, path);
+                if (cjk < 0) continue;
+                cui_font_add_fallback(ui, CUI_FONT_BODY, cjk);
+                cui_font_add_fallback(ui, CUI_FONT_MEDIUM, cjk);
+                break;
+            }
+        }
+    }
+#endif
     bool changed = false;
     int done = 0;
     for (int i = 0; i < a->count; i++) done += a->tasks[i].done;

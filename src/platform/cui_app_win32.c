@@ -45,6 +45,7 @@ typedef struct {
     WCHAR high_surrogate;
     RECT ime_caret;        /* the focused text field's caret in client pixels, where the IME opens */
     bool ime_caret_set;
+    bool ime_first_focus_pending;
     int sys_caret_h;       /* height of our hidden system caret, 0 while there is none */
     HCURSOR cursors[CUI_CURSOR_COUNT];
     cui_cursor cursor;
@@ -269,6 +270,15 @@ static void cui__win32_text_input_rect(void *user, cui_rect caret) {
     r.top = (LONG)floorf(caret.y * s);
     r.right = r.left + CUI_MAX(1, (LONG)ceilf(caret.w * s));
     r.bottom = r.top + CUI_MAX(1, (LONG)ceilf(caret.h * s));
+    if (w->ime_first_focus_pending && GetFocus() == w->hwnd &&
+        !app->ui->mdown[0] && !app->ui->mdown[1] && !app->ui->mdown[2]) {
+        /* The initial native focus precedes the first CUI text field. Some
+         * TSF IMEs ignore that field until the window gets focus a second
+         * time. Rebind once after the pointer is up, before any text arrives. */
+        w->ime_first_focus_pending = false;
+        SetFocus(NULL);
+        SetFocus(w->hwnd);
+    }
     if (w->ime_caret_set && EqualRect(&r, &w->ime_caret)) return;
     w->ime_caret = r;
     w->ime_caret_set = true;
@@ -433,6 +443,7 @@ static LRESULT CALLBACK cui__win32_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         cui_input_focus(ui, true);
         return 0;
     case WM_KILLFOCUS:
+        if (w) w->ime_first_focus_pending = false;
         if (w && w->sys_caret_h) { DestroyCaret(); w->sys_caret_h = 0; }
         cui_input_focus(ui, false);
         return 0;
@@ -467,6 +478,7 @@ bool cui__plat_init(cui_app *app) {
     cui__win32_dpi_awareness();
     cui__win32 *w = calloc(1, sizeof *w);
     if (!w) return false;
+    w->ime_first_focus_pending = true;
     HINSTANCE inst = GetModuleHandleW(NULL);
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof wc);

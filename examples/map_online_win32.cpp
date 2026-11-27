@@ -158,6 +158,10 @@ static DWORD WINAPI worker(void *arg) {
             }
         }
         if (!disk_tile) for (int attempt = 1; attempt <= 3; attempt++) {
+            EnterCriticalSection(&d->lock);
+            bool suspended = d->stopping || d->paused;
+            LeaveCriticalSection(&d->lock);
+            if (suspended) break; /* no new HTTP attempt after leaving the map */
             if (forced_fault) {
                 n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
             } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);

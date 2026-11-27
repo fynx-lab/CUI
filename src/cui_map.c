@@ -406,7 +406,8 @@ bool cui_map_geo_from_world(int zoom, double x, double y, double *latitude, doub
     return true;
 }
 bool cui_map_project(const cui_map_projection *p, double latitude, double longitude, cui_vec2 *position) {
-    if (!p || !position || p->rect.w <= 0 || p->rect.h <= 0 || !isfinite(p->scale) || p->scale <= 0) return false;
+    if (!p || !position || p->rect.w <= 0 || p->rect.h <= 0 || !isfinite(p->scale) ||
+        !isfinite(p->view.zoom) || p->scale <= 0) return false;
     int z = (int)p->view.zoom;
     double x, y;
     if (!cui_map_world_point(z, latitude, longitude, &x, &y)) return false;

@@ -655,6 +655,7 @@ static void check_marker_badge_hit(void) {
     if (sw && pixels) {
         cui_sw_render(sw, cui_get_draw_data(ui), pixels, 256, 256, 256 * 4, CUI_SW_RGBA);
         CHECK(memcmp(normal, pixels + sample, 3) != 0);
+        CHECK(pixels[sample] < normal[0]); /* light mode: hover border turns dark */
     }
     cui_input_mouse_move(ui, 180, 180);
     cui_begin_frame(ui, 1.f / 60);
@@ -682,6 +683,38 @@ static void check_marker_badge_hit(void) {
         hit = cui_map_ex(ui, "badge", &view, &opts);
     cui_end_frame(ui);
     CHECK(hit.hovered_marker == 32 && cui_get_cursor(ui) == CUI_CURSOR_HAND);
+    free(pixels); cui_sw_destroy(sw); cui_destroy(ui);
+}
+static void check_dark_marker_border(void) {
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.theme = CUI_THEME_DARK});
+    CHECK(ui != NULL);
+    if (!ui) return;
+    cui_set_viewport(ui, 256, 256, 1);
+    cui_map_view view = {0, 0, 0};
+    static const cui_map_marker badge[] = {{31, 0, 0, NULL, 12}};
+    cui_map_opts opts = {0}; opts.markers = badge; opts.marker_count = 1;
+    for (int i = 0; i < 2; i++) {
+        cui_begin_frame(ui, 1.f / 60);
+        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+            cui_map_ex(ui, "dark-badge", &view, &opts);
+        cui_end_frame(ui);
+    }
+    cui_sw_renderer *sw = cui_sw_create();
+    unsigned char *pixels = malloc(256 * 256 * 4);
+    CHECK(sw != NULL && pixels != NULL);
+    if (sw && pixels) {
+        size_t sample = ((size_t)128 * 256 + 140) * 4;
+        cui_sw_render(sw, cui_get_draw_data(ui), pixels, 256, 256, 256 * 4, CUI_SW_RGBA);
+        unsigned normal_red = pixels[sample];
+        cui_input_mouse_move(ui, 140, 128);
+        cui_begin_frame(ui, 1.f / 60);
+        cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+            cui_map_ex(ui, "dark-badge", &view, &opts);
+        cui_end_frame(ui);
+        CHECK(cui_get_cursor(ui) == CUI_CURSOR_HAND);
+        cui_sw_render(sw, cui_get_draw_data(ui), pixels, 256, 256, 256 * 4, CUI_SW_RGBA);
+        CHECK(pixels[sample] > normal_red); /* dark mode: hover border turns white */
+    }
     free(pixels); cui_sw_destroy(sw); cui_destroy(ui);
 }
 int main(int argc, char **argv) {
@@ -815,6 +848,7 @@ int main(int argc, char **argv) {
     check_detailed_names();
     check_optional_label_table_overflow();
     check_marker_badge_hit();
+    check_dark_marker_border();
     cui_mvt_tile *long_tile = long_water_tile();
     CHECK(long_tile != NULL);
     cui_mvt_tile_destroy(long_tile);

@@ -609,7 +609,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         if (p.x < bounds.x - edge || p.x > bounds.x + bounds.w + edge ||
             p.y < bounds.y - edge || p.y > bounds.y + bounds.h + edge) continue;
         bool hovered = mark->id == m->hovered_marker;
-        cui_color border = hovered ? CUI_RGB(0xFFFFFF) : m->palette.marker_halo;
+        cui_color border = hovered ? (ui->mode == CUI_THEME_DARK ? CUI_RGB(0xFFFFFF) : m->palette.place_text)
+                                   : m->palette.marker_halo;
         /* Keep the white hover border inside the marker's hit radius. */
         cui_draw_circle(ui, p, radius + 2, border);
         cui_draw_circle(ui, p, radius + (hovered ? 0.5f : 0.0f), CUI_C(ui, ACCENT));

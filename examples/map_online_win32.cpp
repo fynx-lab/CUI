@@ -9,9 +9,7 @@
 #include "map_tilejson.hpp"
 #include "map_demo_jobs.hpp"
 #include "map_disk_cache.hpp"
-#ifdef CUI_MAP_HOST_LIBRARY
 #include "map_host_win32.hpp"
-#endif
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,11 +24,16 @@
 #define BODY_CAP (2 * 1024 * 1024)
 typedef map_demo_slot slot;
 typedef map_demo_job job;
-typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_t token; char *json; cui_mvt_tile *tile; bool offline, cached_tile; } result;
+typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_t token; char *json; cui_mvt_tile *tile; bool offline, cached_tile; uint64_t network_epoch; } result;
 typedef struct {
     CRITICAL_SECTION lock;
     HANDLE available, stop_event, threads[WORKERS];
     HWND window; bool stopping, paused, offline, refreshing;
+#ifdef CUI_MAP_HOST_LIBRARY
+    map_host_proxy_mode network_mode;
+    wchar_t manual_proxy[260];
+    uint64_t network_epoch;
+#endif
     map_disk_cache *disk;
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[RESULT_QUEUE]; int rhead, rtail, rcount;
@@ -56,7 +59,8 @@ static bool queue_job(demo *d, job item) {
     LeaveCriticalSection(&d->lock);
     return queued;
 }
-static int fetch(const char *path, char **out, int cap, DWORD *status, unsigned *retry_after_ms) {
+static int fetch(const char *path, char **out, int cap, DWORD *status, unsigned *retry_after_ms,
+                 DWORD access, const wchar_t *proxy) {
     int n = -1; *out = NULL; *status = 0; *retry_after_ms = 0;
     wchar_t wide[256];
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 256)) return -1;
@@ -65,8 +69,10 @@ static int fetch(const char *path, char **out, int cap, DWORD *status, unsigned 
 #else
     const wchar_t *agent = L"CUI-Map-Demo/0.1 (+https://github.com/fynx-lab/CUI)";
 #endif
-    HINTERNET session = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (access == WINHTTP_ACCESS_TYPE_NAMED_PROXY && (!proxy || !*proxy)) return -1;
+    HINTERNET session = WinHttpOpen(agent, access,
+                                    access == WINHTTP_ACCESS_TYPE_NAMED_PROXY ? proxy : WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET connect = NULL, request = NULL;
     if (!session) return -1;
     WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
@@ -119,11 +125,15 @@ static int fetch(const char *path, char **out, int cap, DWORD *status, unsigned 
         if (!WinHttpReadData(request, bytes + n, (DWORD)(cap + 1 - n), &read)) { n = -1; break; }
         if (!read) break;
         n += (int)read;
-        if (n > cap) { n = -1; break; }
+        if (n > cap) { n = -2; break; }
     }
     if (n > 0) { bytes[n] = 0; *out = bytes; }
-    else { free(bytes); n = -1; }
+    else free(bytes);
 done:
+    /* A 200 header is not a complete body: retry interrupted/empty reads as
+     * transport failures. A rejected over-limit body must not be retried. */
+    if (n == -1 && *status == 200) *status = 0;
+    if (n == -2 && cap == BODY_CAP) *status = map_host_tile_body_too_large;
     if (request) WinHttpCloseHandle(request);
     if (connect) WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
@@ -137,6 +147,12 @@ static DWORD WINAPI worker(void *arg) {
         if (d->stopping) { LeaveCriticalSection(&d->lock); return 0; }
         if (!d->jcount) { ResetEvent(d->available); LeaveCriticalSection(&d->lock); continue; }
         job j = d->jobs[d->jhead]; d->jhead = (d->jhead + 1) % QUEUE; d->jcount--;
+#ifdef CUI_MAP_HOST_LIBRARY
+        map_host_proxy_mode mode = d->network_mode;
+        wchar_t proxy[260];
+        memcpy(proxy, d->manual_proxy, sizeof proxy);
+        uint64_t epoch = d->network_epoch;
+#endif
         if (!d->jcount) ResetEvent(d->available);
         LeaveCriticalSection(&d->lock);
         char *bytes = NULL;
@@ -172,18 +188,42 @@ static DWORD WINAPI worker(void *arg) {
             if (suspended) break; /* no new HTTP attempt after leaving the map */
             if (forced_fault) {
                 n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
-            } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
-            if (n > 0 || status == 200 || (status && status != 429 && status != 503 && status < 500) || attempt == attempts) break;
+            } else {
+#ifdef CUI_MAP_HOST_LIBRARY
+                DWORD access = mode == map_host_proxy_mode::Direct ? WINHTTP_ACCESS_TYPE_NO_PROXY :
+                               mode == map_host_proxy_mode::Manual ? WINHTTP_ACCESS_TYPE_NAMED_PROXY :
+                                                                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
+                n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms,
+                          access, mode == map_host_proxy_mode::Manual ? proxy : NULL);
+#else
+                n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms,
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL);
+#endif
+            }
+            if (n > 0 || status == 200 || status == 507 || status == 508 || status == map_host_tile_body_too_large ||
+                (status && status != 429 && status != 503 && status < 500) || attempt == attempts) break;
             unsigned delay = map_demo_retry_delay_ms(attempt, retry_after_ms,
                                                       GetTickCount() ^ (unsigned)j.token);
             if (WaitForSingleObject(d->stop_event, delay) != WAIT_TIMEOUT) break;
         }
-        result r = {j.z, j.x, j.y, n > 0 || disk_tile != NULL, status, retry_after_ms, j.token, NULL, NULL, false, disk_tile != NULL};
+        result r = {j.z, j.x, j.y, n > 0 || disk_tile != NULL, status, retry_after_ms, j.token, NULL, NULL, false, disk_tile != NULL, 0};
+#ifdef CUI_MAP_HOST_LIBRARY
+        r.network_epoch = epoch;
+#endif
         if (j.z < 0) {
             map_tilejson parsed; std::string error;
             bool valid_network = n > 0 && map_parse_tilejson(bytes, parsed, error);
             if (valid_network) {
-                if (d->disk) d->disk->write_tilejson(bytes, (size_t)n);
+                if (d->disk) {
+#ifdef CUI_MAP_HOST_LIBRARY
+                    EnterCriticalSection(&d->lock);
+                    if (epoch == d->network_epoch && !d->paused && !d->stopping)
+                        d->disk->write_tilejson(bytes, (size_t)n);
+                    LeaveCriticalSection(&d->lock);
+#else
+                    d->disk->write_tilejson(bytes, (size_t)n);
+#endif
+                }
                 r.json = bytes;
             } else {
                 free(bytes);
@@ -201,8 +241,16 @@ static DWORD WINAPI worker(void *arg) {
             r.tile = disk_tile;
             if (!r.tile && n > 0) {
                 r.tile = cui_mvt_tile_decode(bytes, (size_t)n);
-                if (r.tile && status == 200 && d->disk)
+                if (r.tile && status == 200 && d->disk) {
+#ifdef CUI_MAP_HOST_LIBRARY
+                    EnterCriticalSection(&d->lock);
+                    if (epoch == d->network_epoch && !d->paused && !d->stopping)
+                        d->disk->write_tile(j.tile_template, j.z, j.x, j.y, bytes, (size_t)n);
+                    LeaveCriticalSection(&d->lock);
+#else
                     d->disk->write_tile(j.tile_template, j.z, j.x, j.y, bytes, (size_t)n);
+#endif
+                }
             }
             r.ok = r.tile != NULL;
             free(bytes);
@@ -381,6 +429,12 @@ static void pump(demo *d) {
     LeaveCriticalSection(&d->lock);
     for (int i = 0; i < count; i++) {
         result *r = &results[i];
+#ifdef CUI_MAP_HOST_LIBRARY
+        if (r->network_epoch != d->network_epoch) {
+            free(r->json); cui_mvt_tile_destroy(r->tile);
+            continue;
+        }
+#endif
         if (r->z < 0) {
             d->refreshing = false;
             char previous[sizeof d->template_path];
@@ -631,7 +685,8 @@ int main(void) {
                       (d->last_status == 429 || d->last_status == 503) ? " (throttled)" :
                       d->last_status == 507 ? " (cache busy; retrying)" :
                       d->last_status == 508 ? " (tile exceeds cache budget)" :
-                      d->last_status == 200 ? " (invalid tile)" :
+                      d->last_status == map_host_tile_body_too_large ? " (tile exceeds 2 MiB input limit)" :
+                      d->last_status == 200 ? " (MVT decode failed)" :
                       d->last_status >= 400 ? " (HTTP error)" : " (network error)");
             if (cui_button_ex(ui, "Retry", nullptr)) {
                 for (int i = 0; i < SLOTS; i++) if (d->tiles[i].state == 3) d->tiles[i].state = 0;
@@ -694,9 +749,10 @@ int main(void) {
             slot *s = &d->tiles[i];
             if (s->state != 3 || s->used != d->frame) continue;
             if (!shown_failure) {
-                if (s->status == 200) cui_textf(ui, "Tile z%d/%d/%d: invalid PBF", s->z, s->x, s->y);
+                if (s->status == 200) cui_textf(ui, "Tile z%d/%d/%d: MVT decode failed", s->z, s->x, s->y);
                 else if (s->status == 507) cui_textf(ui, "Tile z%d/%d/%d: cache busy; retrying", s->z, s->x, s->y);
                 else if (s->status == 508) cui_textf(ui, "Tile z%d/%d/%d: exceeds cache budget", s->z, s->x, s->y);
+                else if (s->status == map_host_tile_body_too_large) cui_textf(ui, "Tile z%d/%d/%d: exceeds 2 MiB input limit", s->z, s->x, s->y);
                 else if (s->status) cui_textf(ui, "Tile z%d/%d/%d: HTTP %u", s->z, s->x, s->y, s->status);
                 else cui_textf(ui, "Tile z%d/%d/%d: network error", s->z, s->x, s->y);
                 shown_failure = true;
@@ -739,7 +795,26 @@ int main(void) {
     return 0;
 }
 #else
-map_host_win32 *map_host_create(cui_ctx *ui, void *native_window) {
+static bool valid_connection(const map_host_connection &connection) {
+    if (connection.mode != map_host_proxy_mode::System &&
+        connection.mode != map_host_proxy_mode::Direct &&
+        connection.mode != map_host_proxy_mode::Manual) return false;
+    if (connection.mode != map_host_proxy_mode::Manual) return true;
+    if (!connection.manual_proxy) return false;
+    size_t size = 0;
+    while (size < 260 && connection.manual_proxy[size]) ++size;
+    return size > 0 && size < 260;
+}
+static void copy_connection(demo *d, const map_host_connection &connection) {
+    d->network_mode = connection.mode;
+    d->manual_proxy[0] = 0;
+    if (connection.mode == map_host_proxy_mode::Manual)
+        memcpy(d->manual_proxy, connection.manual_proxy,
+               (wcslen(connection.manual_proxy) + 1) * sizeof(wchar_t));
+}
+map_host_win32 *map_host_create(cui_ctx *ui, void *native_window,
+                                const map_host_connection &connection) {
+    if (!valid_connection(connection)) return NULL;
     demo *d = static_cast<demo *>(calloc(1, sizeof *d));
     if (!d) return NULL;
     InitializeCriticalSection(&d->lock);
@@ -752,6 +827,8 @@ map_host_win32 *map_host_create(cui_ctx *ui, void *native_window) {
     }
     d->ui = ui;
     d->window = (HWND)native_window;
+    copy_connection(d, connection);
+    d->network_epoch = 1;
     cui_ctx_desc raster_desc = {};
     raster_desc.theme = cui_get_theme_mode(ui); raster_desc.no_default_fonts = true;
     d->raster_ui = cui_create(&raster_desc);
@@ -837,6 +914,7 @@ void map_host_pause(map_host_win32 *host) {
     demo *d = reinterpret_cast<demo *>(host);
     EnterCriticalSection(&d->lock);
     d->paused = true;
+    ++d->network_epoch; /* in-flight metadata has no slot token; reject it on resume */
     d->jhead = d->jtail; d->jcount = 0;
     ResetEvent(d->available);
     while (d->rcount) {
@@ -856,13 +934,17 @@ void map_host_retry(map_host_win32 *host) {
     job refresh = {-1, 0, 0, "/planet", ++d->next_token};
     if (queue_job(d, refresh)) { d->refreshing = true; if (d->tilejson != 1) d->tilejson = 0; }
 }
-unsigned map_host_failed_tile(map_host_win32 *host) {
-    if (!host) return 0;
+bool map_host_visible_failure(map_host_win32 *host, map_host_tile_failure *out) {
+    if (!host || !out) return false;
     demo *d = reinterpret_cast<demo *>(host);
-    for (int i = 0; i < SLOTS; ++i)
-        if (d->tiles[i].state == 3 && d->tiles[i].used == d->frame)
-            return d->tiles[i].status ? d->tiles[i].status : 1;
-    return 0;
+    for (int i = 0; i < SLOTS; ++i) {
+        const slot &s = d->tiles[i];
+        if (s.state == 3 && s.used == d->frame) {
+            *out = map_host_tile_failure{s.z, s.x, s.y, s.status};
+            return true;
+        }
+    }
+    return false;
 }
 void map_host_retry_tiles(map_host_win32 *host) {
     if (!host) return;
@@ -870,6 +952,27 @@ void map_host_retry_tiles(map_host_win32 *host) {
     for (int i = 0; i < SLOTS; ++i)
         if (d->tiles[i].state == 3) cache_drop(d, &d->tiles[i]);
     cui_request_redraw(d->ui);
+}
+bool map_host_set_connection(map_host_win32 *host, const map_host_connection &connection) {
+    if (!host || !valid_connection(connection)) return false;
+    demo *d = reinterpret_cast<demo *>(host);
+    EnterCriticalSection(&d->lock);
+    ++d->network_epoch;
+    copy_connection(d, connection);
+    d->jhead = d->jtail; d->jcount = 0;
+    ResetEvent(d->available);
+    d->refreshing = false;
+    bool paused = d->paused;
+    LeaveCriticalSection(&d->lock);
+    /* Only pending and failed slots are dropped. Ready decoded tiles and
+     * raster textures can still be referenced by the current UI frame. */
+    for (int i = 0; i < SLOTS; ++i)
+        if (d->tiles[i].state == 1 || d->tiles[i].state == 3) cache_drop(d, &d->tiles[i]);
+    d->last_status = 0;
+    d->tilejson = d->template_path[0] ? 1 : 0;
+    if (!paused) map_host_retry(host);
+    cui_request_redraw(d->ui);
+    return true;
 }
 int map_host_status(const map_host_win32 *host) {
     return host ? reinterpret_cast<const demo *>(host)->tilejson : -1;

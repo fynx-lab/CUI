@@ -2,7 +2,7 @@
 
 bool map_demo_tile_retryable(unsigned status) {
     return status == 0 || status == 429 || status == 503 ||
-           (status >= 500 && status < 600 && status != 507);
+           (status >= 500 && status < 600 && status != 507 && status != 508);
 }
 
 unsigned map_demo_visible_retry_delay_ms(unsigned retry_count, unsigned retry_after_ms) {

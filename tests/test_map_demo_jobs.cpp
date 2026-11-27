@@ -37,6 +37,8 @@ int main() {
     CHECK(!map_demo_tile_retryable(404));
     CHECK(!map_demo_tile_retryable(200)); /* corrupt MVT, not HTTP success */
     CHECK(!map_demo_tile_retryable(507)); /* cache budget, not transport */
+    CHECK(!map_demo_tile_retryable(508)); /* tile cannot fit decoded cache */
+    CHECK(!map_demo_tile_retryable(1001)); /* host-local over-limit failure */
     CHECK(map_demo_visible_retry_delay_ms(0, 30000) == 30000);
     CHECK(map_demo_visible_retry_delay_ms(0, 0) == 15000);
     CHECK(map_demo_visible_retry_delay_ms(1, 0) == 45000);

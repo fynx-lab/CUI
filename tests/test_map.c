@@ -636,12 +636,33 @@ static void check_marker_badge_hit(void) {
             hit = cui_map_ex(ui, "badge", &view, &opts);
         cui_end_frame(ui);
     }
+    CHECK(cui_get_cursor(ui) == CUI_CURSOR_ARROW);
+    cui_sw_renderer *sw = cui_sw_create();
+    unsigned char *pixels = malloc(256 * 256 * 4);
+    CHECK(sw != NULL && pixels != NULL);
+    unsigned char normal[4] = {0};
+    size_t sample = ((size_t)128 * 256 + 140) * 4;
+    if (sw && pixels) {
+        cui_sw_render(sw, cui_get_draw_data(ui), pixels, 256, 256, 256 * 4, CUI_SW_RGBA);
+        memcpy(normal, pixels + sample, sizeof normal);
+    }
     cui_input_mouse_move(ui, 140, 128);
     cui_begin_frame(ui, 1.f / 60);
     cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
         hit = cui_map_ex(ui, "badge", &view, &opts);
     cui_end_frame(ui);
-    CHECK(hit.hovered_marker == 31);
+    CHECK(hit.hovered_marker == 31 && cui_get_cursor(ui) == CUI_CURSOR_HAND);
+    if (sw && pixels) {
+        cui_sw_render(sw, cui_get_draw_data(ui), pixels, 256, 256, 256 * 4, CUI_SW_RGBA);
+        CHECK(memcmp(normal, pixels + sample, 3) != 0);
+    }
+    cui_input_mouse_move(ui, 180, 180);
+    cui_begin_frame(ui, 1.f / 60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+        hit = cui_map_ex(ui, "badge", &view, &opts);
+    cui_end_frame(ui);
+    CHECK(hit.hovered_marker == -1 && cui_get_cursor(ui) == CUI_CURSOR_ARROW);
+    cui_input_mouse_move(ui, 140, 128);
     cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
     cui_begin_frame(ui, 1.f / 60);
     cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
@@ -653,7 +674,15 @@ static void check_marker_badge_hit(void) {
         hit = cui_map_ex(ui, "badge", &view, &opts);
     cui_end_frame(ui);
     CHECK(hit.clicked_marker == 31);
-    cui_destroy(ui);
+    static const cui_map_marker single[] = {{32, 0, 0, NULL, 1}};
+    opts.markers = single;
+    cui_input_mouse_move(ui, 132, 128);
+    cui_begin_frame(ui, 1.f / 60);
+    cui_column(ui, .width = CUI_FILL, .height = CUI_FILL)
+        hit = cui_map_ex(ui, "badge", &view, &opts);
+    cui_end_frame(ui);
+    CHECK(hit.hovered_marker == 32 && cui_get_cursor(ui) == CUI_CURSOR_HAND);
+    free(pixels); cui_sw_destroy(sw); cui_destroy(ui);
 }
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--drag-bench")) return bench_drag(argv[2]);

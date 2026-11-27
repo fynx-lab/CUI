@@ -377,7 +377,7 @@ typedef struct { const cui_mvt_tile *tile; cui_texture image; float x, y, size; 
 typedef struct {
     cui_map_view view; const cui_map_marker *markers; int nmarkers;
     cui_map_palette palette;
-    int z, count, fallback_count; float scale; bool dragging, defer_vector_base;
+    int z, count, fallback_count, hovered_marker; float scale; bool dragging, defer_vector_base;
     map_ref refs[MAP_REFS], fallback[MAP_REFS];
 } map_paint;
 static double map_clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -608,8 +608,12 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         float edge = radius + 2 > 8 ? radius + 2 : 8;
         if (p.x < bounds.x - edge || p.x > bounds.x + bounds.w + edge ||
             p.y < bounds.y - edge || p.y > bounds.y + bounds.h + edge) continue;
-        cui_draw_circle(ui, p, radius + 2, m->palette.marker_halo);
-        cui_draw_circle(ui, p, radius, CUI_C(ui, ACCENT));
+        bool hovered = mark->id == m->hovered_marker;
+        cui_color halo = hovered ? CUI_C(ui, ACCENT) : m->palette.marker_halo;
+        if (hovered) halo.a = 88;
+        /* Keep the hover silhouette inside the same marker hit radius. */
+        cui_draw_circle(ui, p, radius + 2, halo);
+        cui_draw_circle(ui, p, radius + (hovered ? 1 : 0), CUI_C(ui, ACCENT));
         if (mark->count > 1) {
             char count[16];
             if (mark->count > 999) snprintf(count, sizeof count, "999+");
@@ -690,6 +694,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
     view->longitude = map_lon(map_wrap(map_world_x(view->longitude, z), 256.0 * (1 << z)), z);
     map_paint *m = CUI_PAINT_DATA(ui, map_paint);
     memset(m, 0, sizeof *m);
+    m->hovered_marker = -1;
     m->palette = opts && opts->palette ? *opts->palette : cui_map_palette_default(ui->mode);
     cui_canvas_opts canvas = {0}; canvas.focusable = true;
     cui_size w = opts && opts->width.kind ? opts->width : CUI_FILL;
@@ -782,8 +787,11 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
                              world * scale) - world * scale / 2;
         double x = r.rect.w / 2 + dx, y = r.rect.h / 2 + map_world_y(mark->latitude, z) * scale - cy;
         float hit_radius = mark->count > 1 ? map_marker_radius(mark) + 2 : 8;
-        if (fabs(x - r.mouse.x) < hit_radius && fabs(y - r.mouse.y) < hit_radius) {
+        double mx = x - r.mouse.x, my = y - r.mouse.y;
+        if (!m->dragging && mx * mx + my * my <= hit_radius * hit_radius) {
             out.hovered_marker = mark->id;
+            m->hovered_marker = mark->id;
+            cui__set_cursor(ui, CUI_CURSOR_HAND);
             if (r.clicked && !st->moved) out.clicked_marker = mark->id;
             break;
         }

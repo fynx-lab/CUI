@@ -8,8 +8,7 @@
 /* Limits apply to uncompressed, untrusted tile data. No CUI context is used
  * during decode, so the host can parse on a worker before handing off a tile. */
 enum { MAP_BYTES = 2 * 1024 * 1024, MAP_FEATURES = 12000,
-       MAP_POINTS = 200000, MAP_PATHS = 24000, MAP_FIELDS = 16384,
-       MAP_VALUES = 32768,
+       MAP_POINTS = 200000, MAP_PATHS = 24000,
        MAP_SPANS = 100000, MAP_REFS = 256,
        MAP_LABELS = 256, MAP_LABELS_LOW = 192,
        MAP_LABEL_CELL = 192, MAP_LABEL_CELL_SLOTS = 512,
@@ -211,14 +210,18 @@ static bool map_feature_parse(cui_mvt_tile *t, map_slice data, int kind, int ext
 static bool map_layer(cui_mvt_tile *t, map_slice encoded, bool optional_pass) {
     map_pb p = {encoded.p, encoded.p + encoded.n};
     map_slice name = {0}; int extent = 4096, version = 1;
-    /* Discover the layer first: unknown provider/schema layers are skipped
-     * without an arbitrary 512-feature limit or a large temporary allocation. */
+    size_t feature_count = 0, key_count = 0, value_count = 0;
+    /* Discover the layer and count its metadata before allocating. Unknown
+     * provider layers are validated but need no metadata table. */
     while (p.p < p.end) {
-        unsigned id, wire; uint64_t num;
+        unsigned id, wire; uint64_t num; map_slice v;
         if (!map_field(&p, &id, &wire)) return false;
         if (id == 1 && wire == 2) { if (!map_bytes(&p, &name)) return false; }
         else if (id == 5 && wire == 0) { if (!map_var(&p, &num) || num < 256 || num > 16384) return false; extent = (int)num; }
         else if (id == 15 && wire == 0) { if (!map_var(&p, &num) || num != 2) return false; version = (int)num; }
+        else if (id == 2 && wire == 2) { if (!map_bytes(&p, &v)) return false; feature_count++; }
+        else if (id == 3 && wire == 2) { if (!map_bytes(&p, &v)) return false; key_count++; }
+        else if (id == 4 && wire == 2) { if (!map_bytes(&p, &v)) return false; value_count++; }
         else if (!map_skip(&p, wire)) return false;
     }
     if (version != 2 || !name.p) return false;
@@ -228,10 +231,18 @@ static bool map_layer(cui_mvt_tile *t, map_slice encoded, bool optional_pass) {
                map_eq(name, "transportation_name") ? 7 : map_eq(name, "water_name") ? 8 :
                map_eq(name, "park") ? 9 : map_eq(name, "mountain_peak") ? 10 : 0;
     if (!kind || (kind >= 6) != optional_pass) return true;
-    map_slice *fields = malloc((2 * MAP_FIELDS + MAP_VALUES) * sizeof *fields);
-    if (!fields) return false;
-    map_slice *features = fields, *keys = fields + MAP_FIELDS, *values = fields + 2 * MAP_FIELDS;
-    int nf = 0, nk = 0, nv = 0; bool ok = true, overflow = false;
+    /* Every counted field takes at least two bytes in the capped input. The
+     * temporary slice table is therefore at most 8x the 2 MiB tile size. */
+    if (key_count > SIZE_MAX - feature_count ||
+        value_count > SIZE_MAX - feature_count - key_count) return false;
+    size_t count = feature_count + key_count + value_count;
+    if (count > SIZE_MAX / sizeof(map_slice)) return false;
+    map_slice *fields = count ? malloc(count * sizeof *fields) : NULL;
+    if (count && !fields) return false;
+    map_slice *features = fields;
+    map_slice *keys = fields ? fields + feature_count : NULL;
+    map_slice *values = fields ? fields + feature_count + key_count : NULL;
+    size_t nf = 0, nk = 0, nv = 0; bool ok = true;
     bool optional = kind >= 6;
     p = (map_pb){encoded.p, encoded.p + encoded.n};
     while (p.p < p.end) {
@@ -239,31 +250,23 @@ static bool map_layer(cui_mvt_tile *t, map_slice encoded, bool optional_pass) {
         if (!map_field(&p, &id, &wire)) { ok = false; break; }
         if (id == 2 && wire == 2) {
             if (!map_bytes(&p, &v)) { ok = false; break; }
-            if (nf < MAP_FIELDS && !overflow) features[nf++] = v;
-            else if (optional) overflow = true;
-            else { ok = false; break; }
+            features[nf++] = v;
         } else if (id == 3 && wire == 2) {
             if (!map_bytes(&p, &v)) { ok = false; break; }
-            if (nk < MAP_FIELDS && !overflow) keys[nk++] = v;
-            else if (optional) overflow = true;
-            else { ok = false; break; }
+            keys[nk++] = v;
         } else if (id == 4 && wire == 2) {
-            if (!map_bytes(&p, &v)) { ok = false; break; }
-            if (nv < MAP_VALUES && !overflow) {
-                if (!map_value(v, &values[nv++])) { ok = false; break; }
-            } else if (optional) overflow = true;
-            else { ok = false; break; }
+            if (!map_bytes(&p, &v) || !map_value(v, &values[nv++])) { ok = false; break; }
         } else if (!map_skip(&p, wire)) { ok = false; break; }
     }
     int cap = kind == 6 ? MAP_POI_CANDIDATES : kind == 7 ? MAP_ROAD_NAME_CANDIDATES :
               kind == 8 ? MAP_WATER_NAME_CANDIDATES : kind == 9 ? MAP_PARK_CANDIDATES :
               kind == 10 ? MAP_PEAK_CANDIDATES : MAP_FEATURES;
-    if (ok && !overflow) {
+    if (ok) {
         int retained = 0;
-        for (int i = 0; i < nf; i++) {
+        for (size_t i = 0; i < nf; i++) {
             if (optional && (retained >= cap || t->nfeatures >= MAP_FEATURES)) break;
             int before = t->nfeatures, points = t->npoints, paths = t->npaths;
-            if (!map_feature_parse(t, features[i], kind, extent, keys, nk, values, nv)) {
+            if (!map_feature_parse(t, features[i], kind, extent, keys, (int)nk, values, (int)nv)) {
                 if (optional && t->geometry_limit_hit) {
                     t->nfeatures = before; t->npoints = points; t->npaths = paths;
                     t->geometry_limit_hit = false;

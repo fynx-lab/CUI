@@ -64,8 +64,8 @@ static cui_mvt_tile *large_place_table_tile(void) {
     long_nested(&tile, 3, layer.b, layer.n);
     return cui_mvt_tile_decode(tile.b, tile.n);
 }
-/* OpenFreeMap z4/8/5 contains 21,359 place values. Exercise the
- * observed table size with the last value actually referenced by name. */
+/* Exercise the last referenced value in both an earlier provider tile
+ * (21,359 values) and z2/1/0 (33,766 values). */
 typedef struct { unsigned char b[262144]; size_t n; } large_pb;
 static void large_var(large_pb *b, unsigned n) {
     while (n >= 128) { b->b[b->n++] = (unsigned char)(n | 128); n >>= 7; }
@@ -75,24 +75,53 @@ static void large_nested(large_pb *b, unsigned id, const void *data, size_t n) {
     large_var(b, (id << 3) | 2); large_var(b, (unsigned)n);
     memcpy(b->b + b->n, data, n); b->n += n;
 }
-static cui_mvt_tile *observed_place_values_tile(void) {
+static cui_mvt_tile *observed_place_values_tile(unsigned value_count) {
     map_fixture_buf tags = {{0}, 0}, geom = {{0}, 0};
     map_fixture_buf feature = {{0}, 0}, value = {{0}, 0};
     large_pb *layer = malloc(sizeof *layer), *tile = malloc(sizeof *tile);
     if (!layer || !tile) { free(layer); free(tile); return NULL; }
     layer->n = tile->n = 0;
-    map_fixture_var(&tags, 0); map_fixture_var(&tags, 21358);
+    map_fixture_var(&tags, 0); map_fixture_var(&tags, value_count - 1);
     map_fixture_var(&geom, 9); map_fixture_coord(&geom, 0); map_fixture_coord(&geom, 0);
     map_fixture_nested(&feature, 2, tags.b, tags.n);
     map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
     large_nested(layer, 1, "place", 5);
     large_nested(layer, 2, feature.b, feature.n);
     large_nested(layer, 3, "name", 4);
-    for (int i = 0; i < 21359; i++) {
+    for (unsigned i = 0; i < value_count; i++) {
         value.n = 0;
-        map_fixture_nested(&value, 1, i == 21358 ? "Last" : "A", i == 21358 ? 4 : 1);
+        map_fixture_nested(&value, 1, i == value_count - 1 ? "Last" : "A", i == value_count - 1 ? 4 : 1);
         large_nested(layer, 4, value.b, value.n);
     }
+    large_var(layer, 5 << 3); large_var(layer, 4096);
+    large_var(layer, 15 << 3); large_var(layer, 2);
+    large_nested(tile, 3, layer->b, layer->n);
+    cui_mvt_tile *decoded = cui_mvt_tile_decode(tile->b, tile->n);
+    free(layer); free(tile);
+    return decoded;
+}
+/* Large key and feature tables must not reject a layer whose only retained
+ * place is the final feature, tagged with the final key. */
+static cui_mvt_tile *wide_place_tables_tile(void) {
+    map_fixture_buf tags = {{0}, 0}, geom = {{0}, 0}, line_geom = {{0}, 0};
+    map_fixture_buf feature = {{0}, 0}, ignored = {{0}, 0}, value = {{0}, 0};
+    large_pb *layer = malloc(sizeof *layer), *tile = malloc(sizeof *tile);
+    if (!layer || !tile) { free(layer); free(tile); return NULL; }
+    layer->n = tile->n = 0;
+    map_fixture_var(&tags, 16384); map_fixture_var(&tags, 0);
+    map_fixture_var(&geom, 9); map_fixture_coord(&geom, 0); map_fixture_coord(&geom, 0);
+    map_fixture_nested(&feature, 2, tags.b, tags.n);
+    map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
+    map_fixture_var(&line_geom, 9); map_fixture_coord(&line_geom, 0); map_fixture_coord(&line_geom, 0);
+    map_fixture_var(&line_geom, 10); map_fixture_coord(&line_geom, 1); map_fixture_coord(&line_geom, 0);
+    map_fixture_field(&ignored, 3, 2); map_fixture_nested(&ignored, 4, line_geom.b, line_geom.n);
+    large_nested(layer, 1, "place", 5);
+    for (int i = 0; i < 16384; i++) large_nested(layer, 2, ignored.b, ignored.n);
+    large_nested(layer, 2, feature.b, feature.n);
+    for (int i = 0; i < 16384; i++) large_nested(layer, 3, "x", 1);
+    large_nested(layer, 3, "name", 4);
+    map_fixture_nested(&value, 1, "Last", 4);
+    large_nested(layer, 4, value.b, value.n);
     large_var(layer, 5 << 3); large_var(layer, 4096);
     large_var(layer, 15 << 3); large_var(layer, 2);
     large_nested(tile, 3, layer->b, layer->n);
@@ -525,31 +554,36 @@ static void check_detailed_names(void) {
         cui_mvt_tile_destroy(single);
     }
 }
-/* Optional name tables over their bound are ignored, not mistaken for a
- * malformed base tile; keep a normal place layer after the oversized POI. */
+/* Many valid but unnamed optional features must not hide the base place.
+ * The old fixed-table overflow skipped this layer entirely. */
 static void check_optional_label_table_overflow(void) {
-    long_pb layer = {{0}, 0}, tile = {{0}, 0}, geom = {{0}, 0};
-    long_pb feature = {{0}, 0}, tags = {{0}, 0}, value = {{0}, 0};
-    long_nested(&layer, 1, "poi", 3);
-    for (int i = 0; i <= 16384; i++) long_nested(&layer, 2, "", 0);
-    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
-    long_nested(&tile, 3, layer.b, layer.n);
-    layer.n = 0;
-    long_var(&tags, 0); long_var(&tags, 0);
-    long_var(&geom, 9); long_coord(&geom, 2048); long_coord(&geom, 2048);
-    long_nested(&feature, 2, tags.b, tags.n);
-    long_field(&feature, 3, 1); long_nested(&feature, 4, geom.b, geom.n);
-    long_nested(&layer, 1, "place", 5);
-    long_nested(&layer, 2, feature.b, feature.n);
-    long_nested(&layer, 3, "name", 4);
-    long_nested(&value, 1, "Town", 4);
-    long_nested(&layer, 4, value.b, value.n);
-    long_field(&layer, 5, 4096); long_field(&layer, 15, 2);
-    long_nested(&tile, 3, layer.b, layer.n);
-    cui_mvt_tile *decoded = cui_mvt_tile_decode(tile.b, tile.n);
+    large_pb *layer = malloc(sizeof *layer), *tile = malloc(sizeof *tile);
+    if (!layer || !tile) { CHECK(0); free(layer); free(tile); return; }
+    layer->n = tile->n = 0;
+    map_fixture_buf geom = {{0}, 0}, feature = {{0}, 0}, tags = {{0}, 0}, value = {{0}, 0};
+    map_fixture_var(&geom, 9); map_fixture_coord(&geom, 2048); map_fixture_coord(&geom, 2048);
+    map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
+    large_nested(layer, 1, "poi", 3);
+    for (int i = 0; i <= 16384; i++) large_nested(layer, 2, feature.b, feature.n);
+    large_var(layer, 5 << 3); large_var(layer, 4096);
+    large_var(layer, 15 << 3); large_var(layer, 2);
+    large_nested(tile, 3, layer->b, layer->n);
+    layer->n = feature.n = 0;
+    map_fixture_var(&tags, 0); map_fixture_var(&tags, 0);
+    map_fixture_nested(&feature, 2, tags.b, tags.n);
+    map_fixture_field(&feature, 3, 1); map_fixture_nested(&feature, 4, geom.b, geom.n);
+    large_nested(layer, 1, "place", 5);
+    large_nested(layer, 2, feature.b, feature.n);
+    large_nested(layer, 3, "name", 4);
+    map_fixture_nested(&value, 1, "Town", 4);
+    large_nested(layer, 4, value.b, value.n);
+    large_var(layer, 5 << 3); large_var(layer, 4096);
+    large_var(layer, 15 << 3); large_var(layer, 2);
+    large_nested(tile, 3, layer->b, layer->n);
+    cui_mvt_tile *decoded = cui_mvt_tile_decode(tile->b, tile->n);
     CHECK(decoded != NULL);
     if (decoded) CHECK(detailed_text_vertices(decoded, 12) > 0);
-    cui_mvt_tile_destroy(decoded);
+    cui_mvt_tile_destroy(decoded); free(layer); free(tile);
 }
 static const cui_mvt_tile *road_lookup(void *user, int z, int x, int y) {
     (void)z; (void)x; (void)y; return (const cui_mvt_tile *)user;
@@ -756,9 +790,17 @@ int main(int argc, char **argv) {
     cui_mvt_tile *large_values = large_place_table_tile();
     CHECK(large_values != NULL);
     cui_mvt_tile_destroy(large_values);
-    cui_mvt_tile *observed_values = observed_place_values_tile();
+    cui_mvt_tile *observed_values = observed_place_values_tile(21359);
     CHECK(observed_values != NULL);
     cui_mvt_tile_destroy(observed_values);
+    cui_mvt_tile *failed_coordinate_values = observed_place_values_tile(33766);
+    CHECK(failed_coordinate_values != NULL);
+    if (failed_coordinate_values) CHECK(detailed_text_vertices(failed_coordinate_values, 12) > 0);
+    cui_mvt_tile_destroy(failed_coordinate_values);
+    cui_mvt_tile *wide_tables = wide_place_tables_tile();
+    CHECK(wide_tables != NULL);
+    if (wide_tables) CHECK(detailed_text_vertices(wide_tables, 12) > 0);
+    cui_mvt_tile_destroy(wide_tables);
     CHECK(road_vertices(5, "motorway") > road_vertices(5, "trunk"));
     CHECK(road_vertices(6, "trunk") > road_vertices(6, "primary"));
     CHECK(road_vertices(8, "trunk") > road_vertices(8, "primary"));

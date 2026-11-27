@@ -803,6 +803,8 @@ int main(int argc, char **argv) {
     cui_map_palette dark = cui_map_palette_default(CUI_THEME_DARK);
     CHECK(light.land.r > dark.land.r && light.place_text.r < dark.place_text.r);
     CHECK(light.water.r != dark.water.r && light.road_major.r != dark.road_major.r);
+    CHECK(light.marker_halo.r >= 200 && light.marker_halo.r < 255);
+    CHECK(dark.marker_halo.r >= 200 && dark.marker_halo.r < 255);
     check_raster_fallback(&base_fixture, 1, CUI_THEME_LIGHT, false);
     check_raster_fallback(&base_fixture, 2, CUI_THEME_DARK, false);
     check_raster_fallback(&base_fixture, 1, CUI_THEME_DARK, true);

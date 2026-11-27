@@ -427,12 +427,12 @@ cui_map_palette cui_map_palette_default(cui_theme_mode mode) {
     if (mode == CUI_THEME_DARK) {
         cui_map_palette p = {CUI_RGB(0x202326), CUI_RGB(0x233844), CUI_RGB(0x2C3934),
                              CUI_RGB(0x8C979E), CUI_RGB(0x566169), CUI_RGB(0xE1E4E5),
-                             CUI_RGB(0x262A2D), CUI_RGB(0xF3F4F5)};
+                             CUI_RGB(0xCFD8DE), CUI_RGB(0xF3F4F5)};
         return p;
     }
     cui_map_palette p = {CUI_RGB(0xF4F5F4), CUI_RGB(0xD7E8EE), CUI_RGB(0xE3EBE5),
                          CUI_RGB(0xB3BEC6), CUI_RGB(0xD4DBDF), CUI_RGB(0x273138),
-                         CUI_RGB(0xEDF0F1), CUI_RGB(0xFFFFFF)};
+                         CUI_RGB(0xD5DEE2), CUI_RGB(0xFFFFFF)};
     return p;
 }
 static void map_road(cui_ctx *ui, cui_rect r, const cui_mvt_tile *t, const map_feature *f, cui_color c, float width) {
@@ -609,11 +609,10 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         if (p.x < bounds.x - edge || p.x > bounds.x + bounds.w + edge ||
             p.y < bounds.y - edge || p.y > bounds.y + bounds.h + edge) continue;
         bool hovered = mark->id == m->hovered_marker;
-        cui_color halo = hovered ? CUI_C(ui, ACCENT) : m->palette.marker_halo;
-        if (hovered) halo.a = 88;
-        /* Keep the hover silhouette inside the same marker hit radius. */
-        cui_draw_circle(ui, p, radius + 2, halo);
-        cui_draw_circle(ui, p, radius + (hovered ? 1 : 0), CUI_C(ui, ACCENT));
+        cui_color border = hovered ? CUI_RGB(0xFFFFFF) : m->palette.marker_halo;
+        /* Keep the white hover border inside the marker's hit radius. */
+        cui_draw_circle(ui, p, radius + 2, border);
+        cui_draw_circle(ui, p, radius + (hovered ? 0.5f : 0.0f), CUI_C(ui, ACCENT));
         if (mark->count > 1) {
             char count[16];
             if (mark->count > 999) snprintf(count, sizeof count, "999+");

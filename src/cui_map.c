@@ -614,7 +614,7 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
             cui_text_metrics text = cui_measure_text(ui, CUI_FONT_MEDIUM, 11, count, -1);
             cui_draw_text(ui, CUI_FONT_MEDIUM, 11,
                           (cui_vec2){p.x - text.width / 2, p.y - text.height / 2},
-                          CUI_C(ui, FOREGROUND), count, -1);
+                          CUI_C(ui, ACCENT_FOREGROUND), count, -1);
         }
         if (mark->label) cui_draw_text(ui, CUI_FONT_BODY, 12,
                                       (cui_vec2){p.x + (mark->count > 1 ? radius + 3 : 9), p.y - 7},

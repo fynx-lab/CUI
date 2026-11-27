@@ -157,7 +157,15 @@ static DWORD WINAPI worker(void *arg) {
                 else d->disk->remove_tile(j.tile_template, j.z, j.x, j.y);
             }
         }
-        if (!disk_tile) for (int attempt = 1; attempt <= 3; attempt++) {
+        /* The host must not look permanently stuck on a cold metadata fetch:
+         * one bounded request, then an explicit error/retry. Tile jobs retain
+         * the demo's existing three-attempt policy. */
+#ifdef CUI_MAP_HOST_LIBRARY
+        const int attempts = j.z < 0 ? 1 : 3;
+#else
+        const int attempts = 3;
+#endif
+        if (!disk_tile) for (int attempt = 1; attempt <= attempts; attempt++) {
             EnterCriticalSection(&d->lock);
             bool suspended = d->stopping || d->paused;
             LeaveCriticalSection(&d->lock);
@@ -165,7 +173,7 @@ static DWORD WINAPI worker(void *arg) {
             if (forced_fault) {
                 n = -1; status = (DWORD)atoi(fault); retry_after_ms = 0;
             } else n = fetch(j.path, &bytes, j.z < 0 ? 65536 : BODY_CAP, &status, &retry_after_ms);
-            if (n > 0 || status == 200 || (status && status != 429 && status != 503 && status < 500) || attempt == 3) break;
+            if (n > 0 || status == 200 || (status && status != 429 && status != 503 && status < 500) || attempt == attempts) break;
             unsigned delay = map_demo_retry_delay_ms(attempt, retry_after_ms,
                                                       GetTickCount() ^ (unsigned)j.token);
             if (WaitForSingleObject(d->stop_event, delay) != WAIT_TIMEOUT) break;
@@ -222,7 +230,7 @@ static DWORD WINAPI worker(void *arg) {
 }
 /* Only accept a versioned tile path at OpenFreeMap's HTTPS host. TileJSON
  * supplies this path, never a compiled-in, potentially stale timestamp. */
-static bool template_from_json(demo *d, const char *json) {
+static bool template_from_json(demo *d, const std::string &json) {
     map_tilejson parsed; std::string error;
     if (!map_parse_tilejson(json, parsed, error)) return false;
     memcpy(d->template_path, parsed.path_template.c_str(), parsed.path_template.size() + 1);
@@ -753,6 +761,16 @@ map_host_win32 *map_host_create(cui_ctx *ui, void *native_window) {
         d->raster_ui = NULL; d->raster_sw = NULL;
     }
     d->disk = new (std::nothrow) map_disk_cache();
+    /* A previously validated, size-bounded TileJSON lets cached tiles draw
+     * immediately. Refresh the metadata in the background; pump() replaces
+     * the source and invalidates old tiles if the provider version changed. */
+    if (d->disk) {
+        std::string saved;
+        if (d->disk->read_tilejson(saved) && template_from_json(d, saved)) {
+            d->tilejson = 1;
+            d->offline = true;
+        }
+    }
     int started = 0;
     for (; started < WORKERS; ++started) {
         d->threads[started] = CreateThread(NULL, 0, worker, d, 0, NULL);
@@ -775,8 +793,11 @@ map_host_win32 *map_host_create(cui_ctx *ui, void *native_window) {
 void map_host_begin_frame(map_host_win32 *host) {
     if (!host) return;
     demo *d = reinterpret_cast<demo *>(host);
-    EnterCriticalSection(&d->lock); d->paused = false; LeaveCriticalSection(&d->lock);
-    if (d->tilejson == 0 && !d->refreshing) map_host_retry(host);
+    EnterCriticalSection(&d->lock);
+    bool resumed = d->paused;
+    d->paused = false;
+    LeaveCriticalSection(&d->lock);
+    if ((resumed || d->tilejson == 0) && !d->refreshing) map_host_retry(host);
     pump(d); ++d->frame;
     raster_prepare(d);
 }
@@ -823,7 +844,7 @@ void map_host_pause(map_host_win32 *host) {
         free(r->json); cui_mvt_tile_destroy(r->tile);
         d->rhead = (d->rhead + 1) % RESULT_QUEUE; --d->rcount;
     }
-    if (d->tilejson == 0) d->refreshing = false;
+    d->refreshing = false; /* the queued refresh may have been canceled */
     LeaveCriticalSection(&d->lock);
     for (int i = 0; i < SLOTS; ++i)
         if (d->tiles[i].state == 1) cache_drop(d, &d->tiles[i]);

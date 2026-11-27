@@ -5207,6 +5207,7 @@ typedef struct cui_map_projection {
 /* World pixels at an integer zoom, independent of viewport/pan. X wraps at
  * 256*2^zoom; the caller may use this for stable spatial grouping. */
 CUI_API bool cui_map_world_point(int zoom, double latitude, double longitude, double *x, double *y);
+CUI_API bool cui_map_geo_from_world(int zoom, double x, double y, double *latitude, double *longitude);
 /* Projects a geographic point using exactly this frame's map transform.
  * Returns false for invalid coordinates or a point outside the map rect. */
 CUI_API bool cui_map_project(const cui_map_projection *p, double latitude, double longitude, cui_vec2 *position);

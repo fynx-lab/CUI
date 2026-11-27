@@ -398,6 +398,13 @@ bool cui_map_world_point(int zoom, double latitude, double longitude, double *x,
     *y = map_world_y(latitude, zoom);
     return true;
 }
+bool cui_map_geo_from_world(int zoom, double x, double y, double *latitude, double *longitude) {
+    if (!latitude || !longitude || zoom < 0 || zoom > 14 || !isfinite(x) || !isfinite(y)) return false;
+    double width = 256.0 * (1 << zoom);
+    *longitude = map_lon(map_wrap(x, width), zoom);
+    *latitude = map_lat(map_clamp(y, 0, width), zoom);
+    return true;
+}
 bool cui_map_project(const cui_map_projection *p, double latitude, double longitude, cui_vec2 *position) {
     if (!p || !position || p->rect.w <= 0 || p->rect.h <= 0 || !isfinite(p->scale) || p->scale <= 0) return false;
     int z = (int)p->view.zoom;
@@ -475,7 +482,7 @@ void cui_map_tile_draw_base(cui_ctx *ui, const cui_mvt_tile *tile, cui_rect rect
     cui_map_tile_draw_base_styled(ui, tile, rect, zoom, NULL);
 }
 static float map_marker_radius(const cui_map_marker *marker) {
-    return marker->count > 1 ? (marker->count >= 100 ? 14.0f : 11.0f) : 6.0f;
+    return marker->count > 1 ? (marker->count >= 100 ? 14.0f : 11.0f) : 4.0f;
 }
 static int map_label_group(int kind, int zoom) {
     if (kind == 3) return 0; /* place */
@@ -499,7 +506,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         if (!mark->label || mark->id < 0 || !isfinite(mark->latitude) || !isfinite(mark->longitude)) continue;
         double dx = map_wrap(map_world_x(mark->longitude, m->z) * m->scale - center_x + world_width / 2, world_width) - world_width / 2;
         cui_text_metrics text = cui_measure_text(ui, CUI_FONT_BODY, 12, mark->label, -1);
-        used[labels++] = (cui_rect){bounds.x + bounds.w / 2 + (float)dx + map_marker_radius(mark) + 3,
+        used[labels++] = (cui_rect){bounds.x + bounds.w / 2 + (float)dx +
+                                      (mark->count > 1 ? map_marker_radius(mark) + 3 : 9),
                                       bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) * m->scale - center_y) - 7,
                                       text.width, text.height};
     }
@@ -593,8 +601,9 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
         cui_vec2 p = {bounds.x + bounds.w / 2 + (float)dx,
                       bounds.y + bounds.h / 2 + (float)(map_world_y(mark->latitude, m->z) * m->scale - cy)};
         float radius = map_marker_radius(mark);
-        if (p.x < bounds.x - radius - 2 || p.x > bounds.x + bounds.w + radius + 2 ||
-            p.y < bounds.y - radius - 2 || p.y > bounds.y + bounds.h + radius + 2) continue;
+        float edge = radius + 2 > 8 ? radius + 2 : 8;
+        if (p.x < bounds.x - edge || p.x > bounds.x + bounds.w + edge ||
+            p.y < bounds.y - edge || p.y > bounds.y + bounds.h + edge) continue;
         cui_draw_circle(ui, p, radius + 2, m->palette.marker_halo);
         cui_draw_circle(ui, p, radius, CUI_C(ui, ACCENT));
         if (mark->count > 1) {
@@ -606,7 +615,8 @@ static void map_paint_fn(cui_ctx *ui, cui_rect bounds, void *data) {
                           (cui_vec2){p.x - text.width / 2, p.y - text.height / 2},
                           CUI_C(ui, FOREGROUND), count, -1);
         }
-        if (mark->label) cui_draw_text(ui, CUI_FONT_BODY, 12, (cui_vec2){p.x + radius + 3, p.y - 7},
+        if (mark->label) cui_draw_text(ui, CUI_FONT_BODY, 12,
+                                      (cui_vec2){p.x + (mark->count > 1 ? radius + 3 : 9), p.y - 7},
                                       CUI_C(ui, FOREGROUND), mark->label, -1);
     }
 }
@@ -767,7 +777,7 @@ cui_map_result cui_map_ex(cui_ctx *ui, const char *idstr, cui_map_view *view, co
         double dx = map_wrap(map_world_x(mark->longitude, z) * scale - cx + world * scale / 2,
                              world * scale) - world * scale / 2;
         double x = r.rect.w / 2 + dx, y = r.rect.h / 2 + map_world_y(mark->latitude, z) * scale - cy;
-        float hit_radius = map_marker_radius(mark) + 2;
+        float hit_radius = mark->count > 1 ? map_marker_radius(mark) + 2 : 8;
         if (fabs(x - r.mouse.x) < hit_radius && fabs(y - r.mouse.y) < hit_radius) {
             out.hovered_marker = mark->id;
             if (r.clicked && !st->moved) out.clicked_marker = mark->id;

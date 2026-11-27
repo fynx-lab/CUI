@@ -9,6 +9,9 @@
 #include "map_tilejson.hpp"
 #include "map_demo_jobs.hpp"
 #include "map_disk_cache.hpp"
+#ifdef CUI_MAP_HOST_LIBRARY
+#include "map_host_win32.hpp"
+#endif
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +30,7 @@ typedef struct { int z, x, y, ok; DWORD status; unsigned retry_after_ms; uint64_
 typedef struct {
     CRITICAL_SECTION lock;
     HANDLE available, stop_event, threads[WORKERS];
-    HWND window; bool stopping, offline, refreshing;
+    HWND window; bool stopping, paused, offline, refreshing;
     map_disk_cache *disk;
     job jobs[QUEUE]; int jhead, jtail, jcount;
     result results[RESULT_QUEUE]; int rhead, rtail, rcount;
@@ -57,8 +60,13 @@ static int fetch(const char *path, char **out, int cap, DWORD *status, unsigned 
     int n = -1; *out = NULL; *status = 0; *retry_after_ms = 0;
     wchar_t wide[256];
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 256)) return -1;
-    HINTERNET session = WinHttpOpen(L"CUI-Map-Demo/0.1 (+https://github.com/fynx-lab/CUI)",
-                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+#ifdef CUI_MAP_HOST_LIBRARY
+    const wchar_t *agent = L"Vivida-Photo-Map-Experiment/0.1 (+https://vivida.fynxlab.com/)";
+#else
+    const wchar_t *agent = L"CUI-Map-Demo/0.1 (+https://github.com/fynx-lab/CUI)";
+#endif
+    HINTERNET session = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET connect = NULL, request = NULL;
     if (!session) return -1;
     WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
@@ -191,7 +199,7 @@ static DWORD WINAPI worker(void *arg) {
          * result queue. Never drop a result and strand its slot as pending. */
         for (;;) {
             EnterCriticalSection(&d->lock);
-            if (d->stopping) {
+            if (d->stopping || d->paused) {
                 LeaveCriticalSection(&d->lock);
                 free(r.json); cui_mvt_tile_destroy(r.tile);
                 break;
@@ -452,14 +460,14 @@ static void tile_request(void *user, int z, int x, int y) {
     memcpy(j.tile_template, d->template_path, strlen(d->template_path) + 1);
     if (!queue_job(d, j)) { *s = slot{}; return; }
 }
-static void stop(demo *d) {
+static void stop(demo *d, bool ui_alive = true) {
     EnterCriticalSection(&d->lock); d->stopping = true; LeaveCriticalSection(&d->lock);
     SetEvent(d->stop_event);
     SetEvent(d->available);
     WaitForMultipleObjects(WORKERS, d->threads, TRUE, INFINITE);
     for (int i = 0; i < WORKERS; i++) CloseHandle(d->threads[i]);
     CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock);
-    raster_invalidate(d);
+    if (ui_alive) raster_invalidate(d);
     for (int i = 0; i < SLOTS; i++) cui_mvt_tile_destroy(d->tiles[i].tile);
     free(d->raster_pixels);
     cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
@@ -469,6 +477,7 @@ static void stop(demo *d) {
     }
     delete d->disk;
 }
+#ifndef CUI_MAP_HOST_LIBRARY
 static void map_profile_report(FILE *out, const demo *d, unsigned frames,
                                const double *sum, const double *peak,
                                unsigned long long hits, unsigned long long misses,
@@ -717,3 +726,136 @@ int main(void) {
     stop(d); cui_app_destroy(app); free(d);
     return 0;
 }
+#else
+map_host_win32 *map_host_create(cui_ctx *ui, void *native_window) {
+    demo *d = static_cast<demo *>(calloc(1, sizeof *d));
+    if (!d) return NULL;
+    InitializeCriticalSection(&d->lock);
+    d->available = CreateEventW(NULL, TRUE, FALSE, NULL);
+    d->stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!d->available || !d->stop_event) {
+        if (d->available) CloseHandle(d->available);
+        if (d->stop_event) CloseHandle(d->stop_event);
+        DeleteCriticalSection(&d->lock); free(d); return NULL;
+    }
+    d->ui = ui;
+    d->window = (HWND)native_window;
+    cui_ctx_desc raster_desc = {};
+    raster_desc.theme = cui_get_theme_mode(ui); raster_desc.no_default_fonts = true;
+    d->raster_ui = cui_create(&raster_desc);
+    d->raster_sw = cui_sw_create();
+    if (!d->raster_ui || !d->raster_sw) {
+        cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw);
+        d->raster_ui = NULL; d->raster_sw = NULL;
+    }
+    d->disk = new (std::nothrow) map_disk_cache();
+    int started = 0;
+    for (; started < WORKERS; ++started) {
+        d->threads[started] = CreateThread(NULL, 0, worker, d, 0, NULL);
+        if (!d->threads[started]) break;
+    }
+    if (started != WORKERS) {
+        EnterCriticalSection(&d->lock); d->stopping = true; LeaveCriticalSection(&d->lock);
+        SetEvent(d->stop_event); SetEvent(d->available);
+        if (started) WaitForMultipleObjects(started, d->threads, TRUE, INFINITE);
+        for (int i = 0; i < started; ++i) CloseHandle(d->threads[i]);
+        CloseHandle(d->available); CloseHandle(d->stop_event); DeleteCriticalSection(&d->lock);
+        cui_destroy(d->raster_ui); cui_sw_destroy(d->raster_sw); delete d->disk; free(d);
+        return NULL;
+    }
+    job first = {-1, 0, 0, "/planet", 1};
+    if (!queue_job(d, first)) { stop(d); free(d); return NULL; }
+    d->refreshing = true;
+    return reinterpret_cast<map_host_win32 *>(d);
+}
+void map_host_begin_frame(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    EnterCriticalSection(&d->lock); d->paused = false; LeaveCriticalSection(&d->lock);
+    if (d->tilejson == 0 && !d->refreshing) map_host_retry(host);
+    pump(d); ++d->frame;
+    raster_prepare(d);
+}
+void map_host_options(map_host_win32 *host, cui_map_opts *options) {
+    if (!host || !options) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    options->lookup = tile_lookup;
+    options->request = tile_request;
+    options->raster_lookup = d->raster_ui && d->raster_sw && !d->raster_failed ? raster_lookup : NULL;
+    options->defer_vector_base = options->raster_lookup != NULL;
+    options->tile_user = d;
+    options->min_zoom = d->min_zoom;
+    options->max_zoom = d->max_zoom ? d->max_zoom : 14;
+}
+void map_host_end_frame(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    EnterCriticalSection(&d->lock);
+    map_demo_cancel_stale(d->tiles, SLOTS, d->jobs, QUEUE, d->jhead, d->jtail, d->jcount, d->frame);
+    if (!d->jcount) ResetEvent(d->available);
+    LeaveCriticalSection(&d->lock);
+    for (int i = 0; i < SLOTS; ++i) {
+        slot *s = &d->tiles[i];
+        if (s->state == 2 && s->tile && s->used == d->frame && d->raster_ui && d->raster_sw &&
+            !d->raster_failed && d->raster_tile_bytes && !raster_find(d, s->z, s->x, s->y) &&
+            (d->raster_bytes <= RASTER_BUDGET - d->raster_tile_bytes ||
+             map_demo_raster_victim(d->images, SLOTS, d->frame - 1) >= 0 ||
+             raster_source_victim(d, s->z) >= 0)) { cui_request_redraw(d->ui); break; }
+        if (s->state == 3 && s->used == d->frame && s->next_retry_tick) {
+            int32_t wait_ms = (int32_t)(s->next_retry_tick - GetTickCount());
+            if (wait_ms > 0) cui_request_wakeup(d->ui, (float)wait_ms / 1000.f);
+        }
+    }
+}
+void map_host_pause(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    EnterCriticalSection(&d->lock);
+    d->paused = true;
+    d->jhead = d->jtail; d->jcount = 0;
+    ResetEvent(d->available);
+    while (d->rcount) {
+        result *r = &d->results[d->rhead];
+        free(r->json); cui_mvt_tile_destroy(r->tile);
+        d->rhead = (d->rhead + 1) % RESULT_QUEUE; --d->rcount;
+    }
+    if (d->tilejson == 0) d->refreshing = false;
+    LeaveCriticalSection(&d->lock);
+    for (int i = 0; i < SLOTS; ++i)
+        if (d->tiles[i].state == 1) cache_drop(d, &d->tiles[i]);
+}
+void map_host_retry(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    if (d->refreshing) return;
+    job refresh = {-1, 0, 0, "/planet", ++d->next_token};
+    if (queue_job(d, refresh)) { d->refreshing = true; if (d->tilejson != 1) d->tilejson = 0; }
+}
+unsigned map_host_failed_tile(map_host_win32 *host) {
+    if (!host) return 0;
+    demo *d = reinterpret_cast<demo *>(host);
+    for (int i = 0; i < SLOTS; ++i)
+        if (d->tiles[i].state == 3 && d->tiles[i].used == d->frame)
+            return d->tiles[i].status ? d->tiles[i].status : 1;
+    return 0;
+}
+void map_host_retry_tiles(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    for (int i = 0; i < SLOTS; ++i)
+        if (d->tiles[i].state == 3) cache_drop(d, &d->tiles[i]);
+    cui_request_redraw(d->ui);
+}
+int map_host_status(const map_host_win32 *host) {
+    return host ? reinterpret_cast<const demo *>(host)->tilejson : -1;
+}
+unsigned map_host_last_http(const map_host_win32 *host) {
+    return host ? reinterpret_cast<const demo *>(host)->last_status : 0;
+}
+void map_host_destroy_after_app(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    stop(d, false); /* UI textures belong to the already destroyed app. */
+    free(d);
+}
+#endif

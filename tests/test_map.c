@@ -666,6 +666,9 @@ int main(int argc, char **argv) {
             double wx = -1, wy = -1;
             cui_vec2 projected = {-1, -1};
             CHECK(cui_map_world_point(0, 0, 0, &wx, &wy) && wx == 128 && wy == 128);
+            double lat = 1, lon = 1;
+            CHECK(cui_map_geo_from_world(0, wx, wy, &lat, &lon));
+            CHECK(fabs(lat) < 0.00001 && fabs(lon) < 0.00001);
             CHECK(!cui_map_world_point(15, 0, 0, &wx, &wy));
             CHECK(!cui_map_world_point(0, 91, 0, &wx, &wy));
             CHECK(cui_map_project(&s.last.projection, 0, 0, &projected));

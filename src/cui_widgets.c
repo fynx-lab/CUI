@@ -1250,7 +1250,7 @@ int cui__scroll_begin_ex(cui_ctx *ui, cui_id id, const cui_box *box, bool horizo
     if (fabsf(st->y - st->ty) < 0.25f) st->y = st->ty;
     if (fabsf(st->x - st->tx) < 0.25f) st->x = st->tx;
     bool recent = st->last_activity > 0 && ui->time - st->last_activity < 0.9;
-    bool show = recent || st->hover_bar || st->drag_y;
+    bool show = max_y > 0.5f || (horizontal && max_x > 0.5f) || recent || st->hover_bar || st->drag_y;
     if (recent) cui__wakeup_after(ui, (float)(0.9 - (ui->time - st->last_activity)) + 0.01f);
     cui__tween(ui, &st->bar_t, show ? 1.0f : 0.0f, show ? 0.12f : 0.3f);
 

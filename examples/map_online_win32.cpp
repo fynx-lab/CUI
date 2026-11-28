@@ -950,6 +950,13 @@ void map_host_pause(map_host_win32 *host) {
     for (int i = 0; i < SLOTS; ++i)
         if (d->tiles[i].state == 1) cache_drop(d, &d->tiles[i]);
 }
+void map_host_release_ui(map_host_win32 *host) {
+    if (!host) return;
+    demo *d = reinterpret_cast<demo *>(host);
+    map_host_pause(host);
+    raster_invalidate(d);
+    d->ui = NULL; // Worker shutdown must not access the app's renderer.
+}
 void map_host_retry(map_host_win32 *host) {
     if (!host) return;
     demo *d = reinterpret_cast<demo *>(host);
